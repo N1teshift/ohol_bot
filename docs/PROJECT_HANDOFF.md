@@ -26,7 +26,16 @@ Long-term vision (not all implemented):
 private server → persistent Python client → live world state → survival planner → (next) recipes / family
 ```
 
-**Milestone reached:** single bot **forages, picks up food, and eats** on the private server (`USE` → `SELF`). **Basic obstacle-aware pathfinding** routes around trees; **manual terminal control** lets you walk N tiles in a direction. Remaining work is crafting/recipes, wide collision, and multi-bot coordination.
+**Milestone reached:** single bot **forages, picks up food, and eats** on the private server (`USE` → `SELF`). **Basic obstacle-aware pathfinding** routes around trees; **manual terminal control** lets you walk N tiles in a direction.
+
+**Architecture upgrade completed (safe incremental refactor):**
+
+- `run_live_episode` now delegates to `LiveSessionEngine` (`runner.py`) for loop orchestration.
+- `WorldState` now composes `ActionFeedbackState` (`world_feedback.py`) for move/eat/force feedback bookkeeping.
+- Planner/skills now have a typed facts adapter (`planner_facts.py`) for avoid/blocked/remembered target inputs.
+- Behavior scaffold added (`behaviors.py`) with `SurvivalBehavior` active and `RecipeBehavior` as an off-by-default skeleton.
+
+Remaining work is still crafting/recipes, wide collision, and multi-bot coordination.
 
 **Explicit scope choice:** one live bot first; multi-bot and recipe chains are deferred.
 
@@ -60,15 +69,19 @@ The user develops this project in parallel across multiple chat sessions. Treat 
 ## 3. Architecture
 
 ```
-SurvivalPlanner + SkillLibrary (planner.py, skills.py)
+SurvivalPlanner -> Behavior layer (planner.py, behaviors.py)
+        ↓
+SkillLibrary + typed planner facts adapter (skills.py, planner_facts.py)
         ↓
 movement.py — BFS pathfinding, approach tiles, corner-cutting (blocksWalking)
         ↓
-BotClient API (observe, move_to, pick_up, use, use_self, drop, say, wait)
+LiveSessionEngine (runner.py) — frame/tick pacing, observe/decide/act loop, stop reasons
         ↓
-OholProtocolClient (protocol_client.py) — socket, login, read loop, keep-alive, send actions
+OholProtocolClient (protocol_client.py) — socket, login, read loop, keep-alive, action send
         ↓
-WorldState (world_state.py) — PU/PM/FX/MC/MX → Observation; birth tile, blocked/avoid; spatial_memory (working + long-term)
+WorldState + ActionFeedbackState (world_state.py, world_feedback.py)
+  - packet-derived model from PU/PM/FX/MC/MX
+  - action feedback (blocked/avoid, move in-flight, eat pending, FORCE recovery)
         ↓
 protocol_messages.py + protocol_framing.py — parse SN, ACCEPTED, PU, PM, CM, MC, FX, LN, …
         ↓
@@ -77,7 +90,7 @@ game_data.py — object names, foodValue, transitions from sandbox
 Private OHOL Server (OneLifeServer.exe on localhost:8005)
 ```
 
-**Current state:** A **single bot** can stay connected, build observations from streamed packets, and run a **closed-loop** `run-live` command with optional terminal **dashboard** (`--watch`).
+**Current state:** A **single bot** can stay connected, build observations from streamed packets, and run a **closed-loop** `run-live` command with optional terminal **dashboard** (`--watch`). The refactor preserves behavior while creating clear seams for recipe and multi-bot work.
 
 ---
 
@@ -100,12 +113,16 @@ ohol_bot/
 │   ├── protocol_client.py       # OholProtocolClient — live session + actions
 │   ├── protocol_messages.py     # Message parser
 │   ├── protocol_framing.py      # Binary MC/CM chunk framing
-│   ├── world_state.py           # Mutable world → Observation; birth tile, move seq, avoid
+│   ├── world_state.py           # Packet-derived world model + observation builder
+│   ├── world_feedback.py        # Action feedback state (blocked/avoid/eat pending/force)
 │   ├── spatial_memory.py        # Working (radius 24) + long-term map memory (absolute tiles)
 │   ├── resource_memory.py       # Branch/tree landmark names + collect matching helpers
 │   ├── movement.py              # BFS pathfinding around blocksWalking
 │   ├── game_data.py             # objects/ transitions from sandbox
-│   ├── planner.py, skills.py    # SurvivalPlanner + forage/home/collect/explore
+│   ├── planner.py               # SurvivalPlanner orchestrating behavior modules
+│   ├── behaviors.py             # Behavior layer (SurvivalBehavior + RecipeBehavior scaffold)
+│   ├── skills.py                # Skill library consumed by behaviors
+│   ├── planner_facts.py         # Typed adapter over observation.facts for planner/skills
 │   ├── manual_control.py        # Interactive terminal control (control CLI)
 │   ├── dashboard.py             # Terminal dashboard for --watch
 │   ├── runner.py                # run_episode, run_live_episode

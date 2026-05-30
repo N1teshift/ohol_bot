@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 
 from .hunger import eat_blocker
+from .planner_facts import PlannerFacts, planner_facts
 
 from .model import Action, ActionType, Observation, ObjectState, Tile
 
@@ -105,9 +106,10 @@ class SkillLibrary:
 
             )
 
-        food = observation.nearest_food(exclude=_avoid_targets(observation))
+        facts = planner_facts(observation)
+        food = observation.nearest_food(exclude=facts.avoid_targets)
 
-        if food is not None and food.tile not in _avoid_targets(observation):
+        if food is not None and food.tile not in facts.avoid_targets:
             if player.tile == food.tile or _is_adjacent(player.tile, food.tile):
                 return SkillResult(
                     name="forage_food",
@@ -125,7 +127,8 @@ class SkillLibrary:
 
         remembered = _move_toward_remembered(
             observation,
-            "nearest_remembered_food",
+            facts,
+            fact_key="nearest_remembered_food",
             pickup_when_reached=True,
         )
         if remembered is not None:
@@ -178,7 +181,8 @@ class SkillLibrary:
 
         remembered = _move_toward_remembered(
             observation,
-            "nearest_remembered_collect",
+            planner_facts(observation),
+            fact_key="nearest_remembered_collect",
             pickup_when_reached=True,
         )
         if remembered is not None:
@@ -219,24 +223,11 @@ def _adjacent_food(observation: Observation) -> ObjectState | None:
     )
 
 
-def _avoid_targets(observation: Observation) -> frozenset[Tile]:
-    raw = observation.facts.get("avoid_targets")
-    if not isinstance(raw, tuple):
-        return frozenset()
-    return frozenset(Tile(int(x), int(y)) for x, y in raw)
-
-
-def _blocked_tiles(observation: Observation) -> frozenset[Tile]:
-    raw = observation.facts.get("blocked_tiles")
-    if not isinstance(raw, tuple):
-        return frozenset()
-    return frozenset(Tile(int(x), int(y)) for x, y in raw)
-
-
 def _explore_step(observation: Observation) -> Tile:
     player = observation.self
-    blocked = _blocked_tiles(observation) | _avoid_targets(observation)
-    previous = _previous_tile(observation)
+    facts = planner_facts(observation)
+    blocked = facts.blocked_tiles | facts.avoid_targets
+    previous = facts.previous_tile
     offsets = (
         (0, 1),
         (1, 0),
@@ -261,29 +252,22 @@ def _explore_step(observation: Observation) -> Tile:
     return Tile(player.tile.x + 1, player.tile.y)
 
 
-def _previous_tile(observation: Observation) -> Tile | None:
-    raw = observation.facts.get("previous_tile")
-    if not isinstance(raw, dict):
-        return None
-    return Tile(int(raw["x"]), int(raw["y"]))
-
-
 def _move_toward_remembered(
     observation: Observation,
-    fact_key: str,
+    facts: PlannerFacts,
     *,
+    fact_key: str,
     pickup_when_reached: bool = False,
 ) -> SkillResult | None:
-    raw = observation.facts.get(fact_key)
-    if not isinstance(raw, dict):
+    remembered = (
+        facts.nearest_remembered_food
+        if fact_key == "nearest_remembered_food"
+        else facts.nearest_remembered_collect
+    )
+    if remembered is None:
         return None
-    rel_x = raw.get("rel_x")
-    rel_y = raw.get("rel_y")
-    if rel_x is None or rel_y is None:
-        return None
-    name = str(raw.get("name", "resource"))
-    target = Tile(int(rel_x), int(rel_y))
-    if target in _avoid_targets(observation):
+    target = remembered.tile
+    if target in facts.avoid_targets:
         return None
     player = observation.self
     at_target = player.tile == target
@@ -292,11 +276,11 @@ def _move_toward_remembered(
         return SkillResult(
             name="navigate_remembered",
             action=Action(ActionType.PICK_UP, {"x": target.x, "y": target.y}),
-            reason=f"remembered {name} (pick up)",
+            reason=f"remembered {remembered.name} (pick up)",
         )
     return SkillResult(
         name="navigate_remembered",
         action=Action(ActionType.MOVE_TO, {"x": target.x, "y": target.y}),
-        reason=f"remembered {name}",
+        reason=f"remembered {remembered.name}",
     )
 

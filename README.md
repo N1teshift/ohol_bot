@@ -54,8 +54,12 @@ One-shot: `python -m ohol_bot.cli control move 10 east`. Add `--watch` for the d
 ## What works today
 
 - HMAC login and **persistent session** (read loop + `KA 0 0#` keep-alive)
+- **LiveSessionEngine orchestration** for `run-live` loop pacing and stop reasons (while preserving CLI behavior)
 - **World state** from PU, PM, FX, MC, MX (position, hunger, map objects, players)
+- **World/action state split started**: `WorldState` (packet-derived) + `ActionFeedbackState` (move/eat/force feedback)
 - **Survival planner** live: move to food, pick up, **eat held food (`SELF`)** — verified end-to-end on private server
+- **Typed planner-facts adapter** (`planner_facts.py`) used by skills for avoid/blocked/remembered targets
+- **Behavior-layer scaffold** (`behaviors.py`): `SurvivalBehavior` active, `RecipeBehavior` skeleton for next feature
 - **Obstacle-aware pathfinding** (`movement.py`): 8-way BFS around `blocksWalking`, birth-relative coords, corner-cutting, approach tiles for blocked food
 - **Stuck avoidance:** `avoid_targets` / `blocked_tiles`, rotating explore, adjacent pickup even when a food tile was avoided for walking
 - **Hunger trigger**: forage when one stomach pip is missing (`food_store < max_food_store`)
@@ -69,6 +73,7 @@ One-shot: `python -m ohol_bot.cli control move 10 east`. Add `--watch` for the d
 - **`scripts/verify_bot_run.py`**: automated stuck detection after movement changes
 - Game data loader (~4400 objects, transitions) from `.ohol_runtime/server`
 - Mock scenarios and unit tests under `tests/`
+- Full regression suite currently passing: `111` tests
 
 ## Bot API
 
@@ -142,6 +147,10 @@ Separate credentials per bot copy avoid Steam single-session disconnects.
 | Manual terminal control | **Done** |
 | Self-id + action-tile + birth-tile coords | Done |
 | Held-by / eat-held-food behavior | Done |
+| Session engine extraction | Done |
+| World/action feedback split foundation | Done |
+| Typed planner-facts adapter | Done |
+| Behavior-layer scaffold | Done |
 | Recipe / transition planner (fire, tools) | Not started |
 | Multi-bot family coordinator | Skeleton only |
 | Wide collision / leftBlockingRadius | Not started |

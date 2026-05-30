@@ -8,6 +8,7 @@ from .game_data import OholGameData
 from .model import Action, ActionType, ObjectState, Observation, PlayerState, Tile, step_toward
 from .movement import next_walkable_step
 from .spatial_memory import SpatialMemory, WORKING_RADIUS, remembered_target_fact
+from .world_feedback import ActionFeedbackState
 from .protocol_messages import (
     CravingMessage,
     FoodChangeMessage,
@@ -38,25 +39,47 @@ class WorldState:
     latched_self_held_object_id: int | None = None
     latched_self_held_yum: bool = False
     expect_empty_hands: bool = False
-    eat_pending: bool = False
-    eat_wait_ticks: int = 0
-    eat_started_food_store: int = 0
+    feedback: ActionFeedbackState = field(default_factory=ActionFeedbackState)
     self_age_base: float = 0.0
     self_inv_age_rate_seconds: float = 15.0
     self_age_set_at: float | None = None
     self_move_started_at: float | None = None
-    pending_force_tile: Tile | None = None
     birth_tile: Tile | None = None
-    last_outgoing_move_seq: int = 0
-    confirmed_move_seq: int = 0
-    pending_move_step: Tile | None = None
-    blocked_tiles: set[Tile] = field(default_factory=set)
-    avoid_targets: set[Tile] = field(default_factory=set)
-    blocked_target_attempts: dict[Tile, int] = field(default_factory=dict)
-    last_move_target: Tile | None = None
     _prev_self_tile: Tile | None = None
     _unchanged_move_ticks: int = 0
     spatial_memory: SpatialMemory = field(default_factory=SpatialMemory)
+
+    @property
+    def blocked_tiles(self) -> set[Tile]:
+        return self.feedback.blocked_tiles
+
+    @property
+    def avoid_targets(self) -> set[Tile]:
+        return self.feedback.avoid_targets
+
+    @property
+    def blocked_target_attempts(self) -> dict[Tile, int]:
+        return self.feedback.blocked_target_attempts
+
+    @property
+    def last_move_target(self) -> Tile | None:
+        return self.feedback.last_move_target
+
+    @last_move_target.setter
+    def last_move_target(self, value: Tile | None) -> None:
+        self.feedback.last_move_target = value
+
+    @property
+    def confirmed_move_seq(self) -> int:
+        return self.feedback.confirmed_move_seq
+
+    @property
+    def pending_force_tile(self) -> Tile | None:
+        return self.feedback.pending_force_tile
+
+    @property
+    def eat_pending(self) -> bool:
+        return self.feedback.eat_pending
 
     def to_absolute(self, tile: Tile) -> Tile:
         if self.birth_tile is None:
@@ -74,38 +97,21 @@ class WorldState:
         self.birth_tile = Tile(absolute.x - relative.x, absolute.y - relative.y)
 
     def note_move_sent(self, step: Tile, target: Tile, sequence: int) -> None:
-        self.last_outgoing_move_seq = sequence
-        self.pending_move_step = step
-        self.last_move_target = target
+        self.feedback.note_move_sent(step, target, sequence)
         self._unchanged_move_ticks = 0
         self._mark_self_moving()
 
     def note_force_truncation(self) -> None:
-        if self.pending_move_step is not None:
-            self.blocked_tiles.add(self.pending_move_step)
-        if self.last_move_target is not None:
-            self.blocked_tiles.add(self.last_move_target)
-            self.avoid_targets.add(self.last_move_target)
-        self.pending_move_step = None
-        self.last_outgoing_move_seq = 0
+        self.feedback.note_force_truncation()
 
     def note_move_blocked(self, target: Tile) -> None:
-        attempts = self.blocked_target_attempts.get(target, 0) + 1
-        self.blocked_target_attempts[target] = attempts
-        if attempts >= 2:
-            self.avoid_targets.add(target)
+        self.feedback.note_move_blocked(target)
 
     def note_move_step_failed(self) -> None:
-        if self.pending_move_step is not None:
-            self.blocked_tiles.add(self.pending_move_step)
-        self.pending_move_step = None
-        self.last_outgoing_move_seq = 0
+        self.feedback.note_move_step_failed()
 
     def move_in_flight(self) -> bool:
-        return (
-            self.last_outgoing_move_seq > 0
-            and self.confirmed_move_seq < self.last_outgoing_move_seq
-        )
+        return self.feedback.move_in_flight()
 
     def note_outgoing_action(
         self,
@@ -136,7 +142,9 @@ class WorldState:
             else:
                 next_tile = step_toward(start, target)
             if next_tile != start:
-                sequence = action.payload.get("sequence", self.last_outgoing_move_seq + 1)
+                sequence = action.payload.get(
+                    "sequence", self.feedback.last_outgoing_move_seq + 1
+                )
                 self.note_move_sent(next_tile, target, sequence)
             return
 
@@ -168,9 +176,7 @@ class WorldState:
             self.pending_held_object_id = None
             self.pending_held_food_value = 0
             self.expect_empty_hands = True
-            self.eat_pending = True
-            self.eat_wait_ticks = 0
-            self.eat_started_food_store = observation.self.food_store
+            self.feedback.note_use_self(observation.self.food_store)
             return
 
         if action.type is ActionType.DROP:
@@ -216,8 +222,7 @@ class WorldState:
             player = self.players.get(self.self_player_id)
             if player is None:
                 return
-            if self.eat_pending and message.food_store > self.eat_started_food_store:
-                self._clear_eat_pending()
+            self.feedback.maybe_clear_eat_pending_on_food_change(message.food_store)
             self.players[self.self_player_id] = replace(
                 player,
                 food_store=message.food_store,
@@ -280,13 +285,13 @@ class WorldState:
             game_data,
         )
         previous_tile = self._prev_self_tile
-        if self.last_move_target is not None:
+        if self.feedback.last_move_target is not None:
             if self._prev_self_tile == self_player.tile:
                 self._unchanged_move_ticks += 1
             else:
                 self._unchanged_move_ticks = 0
             if self._unchanged_move_ticks >= 4:
-                self.avoid_targets.add(self.last_move_target)
+                self.feedback.avoid_targets.add(self.feedback.last_move_target)
                 self._unchanged_move_ticks = 0
         self._prev_self_tile = self_player.tile
         self._tick_eat_pending()
@@ -343,14 +348,16 @@ class WorldState:
                 "tracked_floor_tiles": len(self.tile_floors),
                 "held_latched_id": self.latched_self_held_object_id,
                 "held_pending_id": self.pending_held_object_id,
-                "eat_pending": self.eat_pending,
+                "eat_pending": self.feedback.eat_pending,
                 "age_server_base": self.self_age_base,
                 "age_seconds_per_year": self.self_inv_age_rate_seconds,
                 "self_biome_name": self_biome_name,
                 "nearby_biome_counts": nearby_biome_counts,
                 "avoid_targets": tuple(
                     (tile.x, tile.y)
-                    for tile in sorted(self.avoid_targets, key=lambda t: (t.x, t.y))
+                    for tile in sorted(
+                        self.feedback.avoid_targets, key=lambda t: (t.x, t.y)
+                    )
                 ),
                 "birth_tile": (
                     {"x": self.birth_tile.x, "y": self.birth_tile.y}
@@ -359,7 +366,9 @@ class WorldState:
                 ),
                 "blocked_tiles": tuple(
                     (tile.x, tile.y)
-                    for tile in sorted(self.blocked_tiles, key=lambda t: (t.x, t.y))
+                    for tile in sorted(
+                        self.feedback.blocked_tiles, key=lambda t: (t.x, t.y)
+                    )
                 ),
                 "previous_tile": (
                     {"x": previous_tile.x, "y": previous_tile.y}
@@ -425,9 +434,7 @@ class WorldState:
         return replace(self.players[self.self_player_id], is_stationary=True)
 
     def take_pending_force(self) -> Tile | None:
-        tile = self.pending_force_tile
-        self.pending_force_tile = None
-        return tile
+        return self.feedback.take_pending_force()
 
     def _mark_self_moving(self) -> None:
         self._set_self_stationary(False)
@@ -446,17 +453,11 @@ class WorldState:
         self.players[self.self_player_id] = replace(player, is_stationary=is_stationary)
 
     def _clear_eat_pending(self) -> None:
-        self.eat_pending = False
-        self.eat_wait_ticks = 0
+        self.feedback.clear_eat_pending()
 
     def _tick_eat_pending(self) -> None:
-        if not self.eat_pending:
-            return
         from .hunger import EAT_PENDING_TIMEOUT_TICKS
-
-        self.eat_wait_ticks += 1
-        if self.eat_wait_ticks >= EAT_PENDING_TIMEOUT_TICKS:
-            self._clear_eat_pending()
+        self.feedback.tick_eat_pending(EAT_PENDING_TIMEOUT_TICKS)
 
     def _apply_player_update(self, entry) -> None:
         if entry.x is None or entry.y is None:
@@ -470,17 +471,16 @@ class WorldState:
         is_stationary = existing.is_stationary if existing else True
         if entry.player_id == self.self_player_id:
             if entry.force_position and entry.x is not None and entry.y is not None:
-                self.note_force_truncation()
-                self.pending_force_tile = Tile(entry.x, entry.y)
+                self.feedback.note_force_position(
+                    Tile(entry.x, entry.y),
+                    entry.done_moving_seq,
+                )
                 self._mark_self_stationary()
-                self.confirmed_move_seq = entry.done_moving_seq
                 is_stationary = True
                 tile = Tile(entry.x, entry.y)
             elif entry.done_moving_seq > 0:
-                self.confirmed_move_seq = entry.done_moving_seq
-                if entry.done_moving_seq == self.last_outgoing_move_seq:
+                if self.feedback.note_move_confirmed(entry.done_moving_seq):
                     self._mark_self_stationary()
-                    self.pending_move_step = None
                     is_stationary = True
             if entry.age is not None:
                 self.self_age_base = entry.age
