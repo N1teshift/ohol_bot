@@ -12,6 +12,8 @@ class OholObject:
     object_id: int
     name: str
     blocks_walking: bool = False
+    left_blocking_radius: int = 0
+    right_blocking_radius: int = 0
     food_value: int = 0
     num_uses: int = 1
     spawn_biomes: frozenset[int] = frozenset()
@@ -68,6 +70,8 @@ def parse_object_file(path: str | Path) -> OholObject:
         object_id=object_id,
         name=name,
         blocks_walking=values.get("blocksWalking", "0") == "1",
+        left_blocking_radius=_safe_int(values.get("leftBlockingRadius", "0"), 0),
+        right_blocking_radius=_safe_int(values.get("rightBlockingRadius", "0"), 0),
         food_value=_safe_int(values.get("foodValue", "0"), 0),
         num_uses=_safe_int(values.get("numUses", "1").split(",", maxsplit=1)[0], 1),
         spawn_biomes=_parse_spawn_biomes(lines),
@@ -114,11 +118,12 @@ def parse_transition_file(path: str | Path) -> OholTransition | None:
 def _key_values(lines: list[str]) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in lines:
-        for part in line.split("#"):
-            if "=" not in part:
-                continue
-            key, value = part.split("=", maxsplit=1)
-            values[key.strip()] = value.strip()
+        for hash_part in line.split("#"):
+            for part in hash_part.split(","):
+                if "=" not in part:
+                    continue
+                key, value = part.split("=", maxsplit=1)
+                values[key.strip()] = value.strip()
     return values
 
 

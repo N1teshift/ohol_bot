@@ -60,7 +60,9 @@ One-shot: `python -m ohol_bot.cli control move 10 east`. Add `--watch` for the d
 - **Survival planner** live: move to food, pick up, **eat held food (`SELF`)** — verified end-to-end on private server
 - **Typed planner-facts adapter** (`planner_facts.py`) used by skills for avoid/blocked/remembered targets
 - **Behavior-layer scaffold** (`behaviors.py`): `SurvivalBehavior` active, `RecipeBehavior` skeleton for next feature
+- **RecipeBehavior v1 (opt-in)**: gathers early recipe resources; supports transition-driven goal inputs
 - **Obstacle-aware pathfinding** (`movement.py`): 8-way BFS around `blocksWalking`, birth-relative coords, corner-cutting, approach tiles for blocked food
+- **Wide collision v1**: uses `leftBlockingRadius`/`rightBlockingRadius` footprints when checking walkability
 - **Stuck avoidance:** `avoid_targets` / `blocked_tiles`, rotating explore, adjacent pickup even when a food tile was avoided for walking
 - **Hunger trigger**: forage when one stomach pip is missing (`food_store < max_food_store`)
 - **`--frame-paced` loop**: one planner step per server **`FM`** frame; recommended for live play
@@ -74,6 +76,7 @@ One-shot: `python -m ohol_bot.cli control move 10 east`. Add `--watch` for the d
 - Game data loader (~4400 objects, transitions) from `.ohol_runtime/server`
 - Mock scenarios and unit tests under `tests/`
 - Full regression suite currently passing: `111` tests
+- Full regression suite currently passing: `123` tests
 
 ## Bot API
 
@@ -103,6 +106,7 @@ Examples:
 
 ```powershell
 python -m ohol_bot.cli run-live --forever --frame-paced --watch
+python -m ohol_bot.cli run-live --enable-recipe-behavior --recipe-goal-object-id 99 --frame-paced --watch
 python -m ohol_bot.cli control --frame-paced --watch
 python -m ohol_bot.cli control move 10 east
 python -m ohol_bot.cli stay-alive --seconds 60 --watch
@@ -151,6 +155,9 @@ Separate credentials per bot copy avoid Steam single-session disconnects.
 | World/action feedback split foundation | Done |
 | Typed planner-facts adapter | Done |
 | Behavior-layer scaffold | Done |
+| RecipeBehavior v1 (opt-in gather) | Done |
+| Transition-driven recipe input selection | Done |
+| Wide collision footprint checks | Done (v1 approximation) |
 | Recipe / transition planner (fire, tools) | Not started |
 | Multi-bot family coordinator | Skeleton only |
 | Wide collision / leftBlockingRadius | Not started |

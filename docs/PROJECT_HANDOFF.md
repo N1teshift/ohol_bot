@@ -35,6 +35,13 @@ private server → persistent Python client → live world state → survival pl
 - Planner/skills now have a typed facts adapter (`planner_facts.py`) for avoid/blocked/remembered target inputs.
 - Behavior scaffold added (`behaviors.py`) with `SurvivalBehavior` active and `RecipeBehavior` as an off-by-default skeleton.
 
+**Post-refactor progress (implemented):**
+
+- `RecipeBehavior` now has an opt-in v1 gather mode for early recipe resources.
+- `run-live` supports `--enable-recipe-behavior` and `--recipe-goal-object-id` (transition-driven input names).
+- `recipe_graph.py` provides direct transition lookup for producers of a target object id.
+- Movement now considers object `leftBlockingRadius` / `rightBlockingRadius` collision footprints (v1 approximation).
+
 Remaining work is still crafting/recipes, wide collision, and multi-bot coordination.
 
 **Explicit scope choice:** one live bot first; multi-bot and recipe chains are deferred.
@@ -117,12 +124,13 @@ ohol_bot/
 │   ├── world_feedback.py        # Action feedback state (blocked/avoid/eat pending/force)
 │   ├── spatial_memory.py        # Working (radius 24) + long-term map memory (absolute tiles)
 │   ├── resource_memory.py       # Branch/tree landmark names + collect matching helpers
-│   ├── movement.py              # BFS pathfinding around blocksWalking
+│   ├── movement.py              # BFS pathfinding + wide-collision footprint checks
 │   ├── game_data.py             # objects/ transitions from sandbox
 │   ├── planner.py               # SurvivalPlanner orchestrating behavior modules
 │   ├── behaviors.py             # Behavior layer (SurvivalBehavior + RecipeBehavior scaffold)
 │   ├── skills.py                # Skill library consumed by behaviors
 │   ├── planner_facts.py         # Typed adapter over observation.facts for planner/skills
+│   ├── recipe_graph.py          # Transition helpers for direct recipe producer lookup
 │   ├── manual_control.py        # Interactive terminal control (control CLI)
 │   ├── dashboard.py             # Terminal dashboard for --watch
 │   ├── runner.py                # run_episode, run_live_episode
@@ -240,6 +248,8 @@ Notes:
 - **`--tick-seconds`**: wall-clock polling interval when not using `--frame-paced` (default `1.0`; each action also waits again after send).
 - **`--watch`**: terminal dashboard (position, hunger, held item, planner reason).
 - **`--game-data-root`**: defaults to `.ohol_runtime/server` for object names, `foodValue`, and `blocksWalking` pathfinding.
+- **`--enable-recipe-behavior`**: enables opt-in recipe gather behavior layer.
+- **`--recipe-goal-object-id <id>`**: if recipe behavior is enabled, derives gather targets from one-step transitions that produce this object id.
 
 ### Manual control session
 
@@ -503,7 +513,7 @@ If `Held` flips from pie → `nothing` while the in-game sprite still holds food
 | Game data parser | Done |
 | Curriculum scenarios | Scaffold |
 | Multi-agent family coordinator | Skeleton only |
-| **Recipe / transition planner** | **Not started — next feature** |
+| **Recipe / transition planner** | **In progress** — RecipeBehavior v1 gather + transition input lookup implemented; multi-step chains not implemented |
 | Wide collision / pathfinding polish | Partial (BFS + blocksWalking only) |
 | Second live bot + coordination | Deferred |
 
@@ -511,9 +521,11 @@ If `Held` flips from pie → `nothing` while the in-game sprite still holds food
 
 ## 14. Recommended Next Steps (Priority Order)
 
-### 1. Recipe / transition planner
+### 1. Recipe / transition planner (next slice)
 
-Use `game_data.py` transitions for early chains: sharp stone, fire, basic tools. Small planner module that emits sequences of `USE` / `PICK_UP` / `DROP` before folding into `SurvivalPlanner`.
+Current: one-step transition producer lookup (`recipe_graph.py`) and opt-in gather behavior.
+
+Next: multi-step chain search over transitions (goal -> prerequisite outputs -> gather/use/drop action plans), then fold planned action sequences into `RecipeBehavior`.
 
 ### 2. Pathfinding polish
 

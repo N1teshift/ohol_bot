@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .behaviors import Behavior, SurvivalBehavior
+from .behaviors import Behavior, RecipeBehavior, SurvivalBehavior
 from .model import Action, ActionType, Observation
 from .skills import SkillLibrary
 
@@ -10,9 +10,23 @@ class SurvivalPlanner:
         self,
         skills: SkillLibrary | None = None,
         behaviors: tuple[Behavior, ...] | None = None,
+        *,
+        enable_recipe_behavior: bool = False,
+        recipe_resource_names: frozenset[str] | None = None,
     ) -> None:
         self.skills = skills or SkillLibrary()
-        self.behaviors = behaviors or (SurvivalBehavior(self.skills),)
+        self.behaviors = behaviors or (
+            RecipeBehavior(enabled=enable_recipe_behavior),
+            SurvivalBehavior(self.skills),
+        )
+        if behaviors is None and recipe_resource_names is not None:
+            self.behaviors = (
+                RecipeBehavior(
+                    enabled=enable_recipe_behavior,
+                    resource_names=recipe_resource_names,
+                ),
+                SurvivalBehavior(self.skills),
+            )
 
     def decide(self, observation: Observation) -> Action:
         if observation.self.is_being_carried:

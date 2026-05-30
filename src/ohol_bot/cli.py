@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .client import MockBotClient
+from .behaviors import RecipeBehavior
 from .live_behaviors import verify_live_behaviors
 from .manual_control import run_manual_control
 from .planner import SurvivalPlanner
@@ -85,6 +86,17 @@ def main() -> None:
         "--game-data-root",
         default=".ohol_runtime/server",
         help="Sandbox path containing objects/ and transitions/",
+    )
+    run_live_parser.add_argument(
+        "--enable-recipe-behavior",
+        action="store_true",
+        help="Enable opt-in recipe gather behavior",
+    )
+    run_live_parser.add_argument(
+        "--recipe-goal-object-id",
+        type=int,
+        default=None,
+        help="Target output object id for transition-driven recipe inputs",
     )
     run_live_parser.add_argument("--watch", action="store_true")
     run_live_parser.add_argument(
@@ -300,7 +312,7 @@ def main() -> None:
         )
         result = run_live_episode(
             client,
-            SurvivalPlanner(),
+            _build_run_live_planner(args, client),
             args.max_ticks,
             tick_seconds=args.tick_seconds,
             frame_paced=args.frame_paced,
@@ -391,6 +403,26 @@ def _build_protocol_client(args: argparse.Namespace) -> OholProtocolClient:
         ),
         keep_alive_interval_seconds=getattr(args, "keep_alive_interval", 5.0),
         game_data_root=getattr(args, "game_data_root", ".ohol_runtime/server"),
+    )
+
+
+def _build_run_live_planner(
+    args: argparse.Namespace,
+    client: OholProtocolClient,
+) -> SurvivalPlanner:
+    enable_recipe = bool(getattr(args, "enable_recipe_behavior", False))
+    goal_object_id = getattr(args, "recipe_goal_object_id", None)
+    recipe_resource_names: frozenset[str] | None = None
+
+    if enable_recipe and goal_object_id is not None and client.game_data is not None:
+        recipe_resource_names = RecipeBehavior.resources_for_goal(
+            client.game_data,
+            output_id=int(goal_object_id),
+        )
+
+    return SurvivalPlanner(
+        enable_recipe_behavior=enable_recipe,
+        recipe_resource_names=recipe_resource_names,
     )
 
 

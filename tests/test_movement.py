@@ -1,10 +1,25 @@
 from ohol_bot.game_data import OholObject
 from ohol_bot.model import Tile
-from ohol_bot.movement import is_walkable, next_walkable_step, tile_blocks_walking
+from ohol_bot.movement import (
+    blocking_footprint_tiles,
+    is_walkable,
+    next_walkable_step,
+    tile_blocks_walking,
+)
 
 
 def _tree() -> OholObject:
     return OholObject(object_id=63, name="Maple Tree", blocks_walking=True)
+
+
+def _wide_tree() -> OholObject:
+    return OholObject(
+        object_id=64,
+        name="Big Maple",
+        blocks_walking=True,
+        left_blocking_radius=1,
+        right_blocking_radius=1,
+    )
 
 
 def test_tile_blocks_walking_when_object_blocks() -> None:
@@ -19,6 +34,32 @@ def test_tile_blocks_walking_when_object_blocks() -> None:
 def test_empty_tile_is_walkable() -> None:
     tile = Tile(0, 0)
     assert is_walkable(tile, {}, {}) is True
+
+
+def test_tile_blocks_walking_from_neighbor_wide_collision() -> None:
+    tree_tile = Tile(5, 5)
+    blocked_neighbor = Tile(6, 5)
+    tile_objects = {tree_tile: 64}
+    objects = {64: _wide_tree()}
+
+    assert tile_blocks_walking(blocked_neighbor, tile_objects, objects) is True
+
+
+def test_blocking_footprint_uses_left_right_asymmetry() -> None:
+    obj = OholObject(
+        object_id=70,
+        name="Asymmetric Rock",
+        blocks_walking=True,
+        left_blocking_radius=2,
+        right_blocking_radius=0,
+    )
+    origin = Tile(10, 10)
+
+    footprint = set(blocking_footprint_tiles(origin, obj))
+
+    assert Tile(8, 10) in footprint
+    assert Tile(10, 10) in footprint
+    assert Tile(11, 10) not in footprint
 
 
 def test_next_walkable_step_avoids_blocking_tree() -> None:

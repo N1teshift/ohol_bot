@@ -17,16 +17,47 @@ _NEIGHBOR_OFFSETS = (
 )
 
 
+def blocking_footprint_tiles(origin: Tile, obj: OholObject) -> tuple[Tile, ...]:
+    """Tiles blocked by an object's collision footprint.
+
+    OHOL object files expose left/right blocking radii. We model these as an
+    asymmetric footprint around the object tile on the x-axis, with a vertical
+    radius equal to the larger side radius.
+    """
+    if not obj.blocks_walking:
+        return ()
+    left = max(0, int(obj.left_blocking_radius))
+    right = max(0, int(obj.right_blocking_radius))
+    if left == 0 and right == 0:
+        return (origin,)
+    vertical = max(left, right)
+    tiles: list[Tile] = []
+    for dx in range(-left, right + 1):
+        for dy in range(-vertical, vertical + 1):
+            tiles.append(Tile(origin.x + dx, origin.y + dy))
+    return tuple(tiles)
+
+
 def tile_blocks_walking(
     tile: Tile,
     tile_objects: dict[Tile, int],
     objects: dict[int, OholObject],
 ) -> bool:
     object_id = tile_objects.get(tile)
-    if object_id is None:
-        return False
-    obj = objects.get(object_id)
-    return bool(obj and obj.blocks_walking)
+    if object_id is not None:
+        obj = objects.get(object_id)
+        if bool(obj and obj.blocks_walking):
+            return True
+
+    for object_tile, object_id in tile_objects.items():
+        if object_tile == tile:
+            continue
+        obj = objects.get(object_id)
+        if obj is None or not obj.blocks_walking:
+            continue
+        if tile in blocking_footprint_tiles(object_tile, obj):
+            return True
+    return False
 
 
 def can_step_to(

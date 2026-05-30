@@ -215,6 +215,38 @@ def test_survival_planner_waits_when_stomach_is_full() -> None:
     assert result.actions[0].type is ActionType.WAIT
 
 
+def test_survival_planner_recipe_behavior_opt_in() -> None:
+    observation = Observation(
+        tick=0,
+        self=PlayerState(
+            player_id=1,
+            tile=Tile(0, 0),
+            age=18,
+            food_store=20,
+            max_food_store=20,
+        ),
+        nearby_objects=(
+            ObjectState(
+                object_id=300,
+                name="Sharp Stone",
+                tile=Tile(3, 0),
+                food_value=0,
+            ),
+        ),
+        home=Tile(0, 0),
+    )
+    client = MockBotClient([observation])
+
+    result = run_episode(
+        client,
+        SurvivalPlanner(enable_recipe_behavior=True),
+        max_ticks=1,
+    )
+
+    assert result.actions[0].type is ActionType.MOVE_TO
+    assert result.actions[0].payload == {"x": 3, "y": 0}
+
+
 def test_survival_planner_seeks_food_with_one_pip_missing() -> None:
     observation = Observation(
         tick=0,

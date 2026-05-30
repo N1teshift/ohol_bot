@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from .game_data import OholGameData
 from .model import Action, ActionType, Observation
+from .recipe_graph import direct_recipe_input_names_for_output
 from .skills import SkillLibrary, _explore_step
 
 
@@ -52,8 +54,62 @@ class SurvivalBehavior:
 
 
 class RecipeBehavior:
-    """Scaffold for future recipe/transition planning behavior."""
+    """Small opt-in recipe behavior for early resource gathering."""
+
+    def __init__(
+        self,
+        *,
+        enabled: bool = False,
+        resource_names: frozenset[str] | None = None,
+    ) -> None:
+        self.enabled = enabled
+        self.resource_names = resource_names or frozenset(
+            {"sharp stone", "round stone", "straight branch", "curved branch"}
+        )
+
+    @staticmethod
+    def resources_for_goal(
+        game_data: OholGameData,
+        output_id: int,
+    ) -> frozenset[str]:
+        inputs = direct_recipe_input_names_for_output(game_data, output_id)
+        if inputs:
+            return inputs
+        return frozenset({"sharp stone", "round stone", "straight branch", "curved branch"})
 
     def decide(self, observation: Observation) -> BehaviorResult | None:
-        _ = observation
+        if not self.enabled:
+            return None
+
+        player = observation.self
+        if player.held_object_id is not None:
+            return None
+
+        target = _nearest_named(
+            observation,
+            self.resource_names,
+        )
+        if target is None:
+            return None
+
+        if player.tile == target.tile or _is_adjacent(player.tile, target.tile):
+            return BehaviorResult(
+                action=Action(ActionType.PICK_UP, {"x": target.tile.x, "y": target.tile.y}),
+                reason=f"recipe gather {target.name}",
+            )
+
+        return BehaviorResult(
+            action=Action(ActionType.MOVE_TO, {"x": target.tile.x, "y": target.tile.y}),
+            reason=f"recipe move to {target.name}",
+        )
+
+
+def _nearest_named(observation: Observation, names: set[str]):
+    candidates = [obj for obj in observation.nearby_objects if obj.name.lower() in names]
+    if not candidates:
         return None
+    return min(candidates, key=lambda obj: observation.self.tile.distance_to(obj.tile))
+
+
+def _is_adjacent(a, b) -> bool:
+    return max(abs(a.x - b.x), abs(a.y - b.y)) == 1

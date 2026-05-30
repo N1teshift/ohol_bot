@@ -25,6 +25,28 @@ def test_parse_object_file(tmp_path: Path) -> None:
     assert obj.food_value == 5
     assert obj.num_uses == 2
     assert obj.blocks_walking is False
+    assert obj.left_blocking_radius == 0
+    assert obj.right_blocking_radius == 0
+
+
+def test_parse_object_blocking_radii(tmp_path: Path) -> None:
+    object_file = tmp_path / "11.txt"
+    object_file.write_text(
+        "\n".join(
+            [
+                "id=11",
+                "Test Tree",
+                "blocksWalking=1,leftBlockingRadius=2,rightBlockingRadius=1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    obj = parse_object_file(object_file)
+
+    assert obj.blocks_walking is True
+    assert obj.left_blocking_radius == 2
+    assert obj.right_blocking_radius == 1
 
 
 def test_parse_transition_file(tmp_path: Path) -> None:
