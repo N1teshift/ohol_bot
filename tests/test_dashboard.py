@@ -54,12 +54,15 @@ def test_format_dashboard_includes_hunger_and_food() -> None:
     )
 
     assert "Stomach: 17/20" in frame.text
-    assert "3 empty base pips" in frame.text
+    assert "effective" not in frame.text
+    assert "empty)" not in frame.text
     assert "Planner hungry: yes" in frame.text
-    assert "Yum bonus pips: +2" in frame.text
-    assert "Next yum eat bonus: +3" in frame.text
-    assert "Craving:" in frame.text
-    assert "wild berry" in frame.text
+    assert frame.text.index("Planner hungry") > frame.text.index("Planner\n")
+    assert "Yum bonus: +2" in frame.text
+    assert "Next Yum: object:100 +4" in frame.text
+    assert "Age at last PU" not in frame.text
+    assert "Craving:" not in frame.text
+    assert "Nearest remembered food" not in frame.text
     assert "Tracked tiles: 42" in frame.text
     assert "planner tick 2" in frame.text
     assert "protocol msgs 3" in frame.text
@@ -83,4 +86,6 @@ def test_format_dashboard_shows_not_hungry_when_full() -> None:
     frame = format_dashboard(client, observation, tick=1)
 
     assert "Planner hungry: no" in frame.text
-    assert "0 empty base pips" in frame.text
+    assert "Holding:" in frame.text
+    assert "Carried by:" in frame.text
+    assert "Next Yum: none" in frame.text

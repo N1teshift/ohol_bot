@@ -15,6 +15,8 @@ class EpisodeResult:
     actions: tuple[Action, ...]
     survived: bool
     metrics: dict[str, float]
+    stop_reason: str = "normal"
+    last_dashboard: str | None = None
 
 
 def run_episode(client: BotClient, policy: Policy, max_ticks: int) -> EpisodeResult:
@@ -65,6 +67,9 @@ def run_live_episode(
         from .dashboard import format_dashboard, print_dashboard
 
     mode = "run-live (frame-paced)" if frame_paced else "run-live"
+    interrupted = False
+    connection_lost = False
+    last_dashboard: str | None = None
 
     try:
         tick = 0
@@ -81,15 +86,15 @@ def run_live_episode(
 
             if observation.self.max_food_store > 0 and observation.self.food_store <= 0:
                 if watch:
-                    print_dashboard(
-                        format_dashboard(
-                            client,
-                            observation,
-                            last_action=actions[-1] if actions else None,
-                            tick=tick,
-                            mode=f"{mode} (starving)",
-                        )
+                    frame = format_dashboard(
+                        client,
+                        observation,
+                        last_action=actions[-1] if actions else None,
+                        tick=tick,
+                        mode=f"{mode} (starving)",
                     )
+                    print_dashboard(frame)
+                    last_dashboard = frame.text
                 return EpisodeResult(
                     ticks=tick,
                     actions=tuple(actions),
@@ -100,19 +105,21 @@ def run_live_episode(
                         "final_y": float(final_tile.y),
                         "server_frames": float(client.server_frames),
                     },
+                    stop_reason="starvation",
+                    last_dashboard=last_dashboard,
                 )
 
             action = policy.decide(observation)
             if watch:
-                print_dashboard(
-                    format_dashboard(
-                        client,
-                        observation,
-                        last_action=action,
-                        tick=tick,
-                        mode=mode,
-                    )
+                frame = format_dashboard(
+                    client,
+                    observation,
+                    last_action=action,
+                    tick=tick,
+                    mode=mode,
                 )
+                print_dashboard(frame)
+                last_dashboard = frame.text
 
             client.send(action)
             actions.append(action)
@@ -122,28 +129,35 @@ def run_live_episode(
 
             tick += 1
     except KeyboardInterrupt:
-        pass
+        interrupted = True
     except ConnectionError:
-        if watch:
-            _clear_screen_on_exit()
-            print("Connection closed by server.")
+        interrupted = False
+        connection_lost = True
+    else:
+        interrupted = False
+        connection_lost = False
     finally:
         client.close()
 
+    stop_reason = (
+        "keyboard_interrupt"
+        if interrupted
+        else "connection_lost"
+        if connection_lost
+        else "normal"
+    )
+    if connection_lost and watch:
+        print("\nConnection closed by server.")
     return EpisodeResult(
         ticks=len(actions),
         actions=tuple(actions),
-        survived=True,
+        survived=not connection_lost,
         metrics={
             "min_food_ratio": min_food_ratio,
             "final_x": float(final_tile.x),
             "final_y": float(final_tile.y),
             "server_frames": float(client.server_frames),
         },
+        stop_reason=stop_reason,
+        last_dashboard=last_dashboard,
     )
-
-
-def _clear_screen_on_exit() -> None:
-    from .dashboard import _clear_screen
-
-    _clear_screen()

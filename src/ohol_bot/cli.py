@@ -11,6 +11,7 @@ from .planner import SurvivalPlanner
 from .model import Action, ActionType, Tile
 from .protocol_client import OholProtocolClient, OholProtocolProbe, ProtocolCredentials
 from .runner import run_episode, run_live_episode
+from .session_log import finish_run_live_session
 from .scenario import load_scenario
 from .server_log import connected_accounts, parse_server_log
 
@@ -86,6 +87,18 @@ def main() -> None:
         help="Sandbox path containing objects/ and transitions/",
     )
     run_live_parser.add_argument("--watch", action="store_true")
+    run_live_parser.add_argument(
+        "--session-log",
+        type=Path,
+        default=Path(".ohol_runtime/logs/last_run.json"),
+        help="Overwrite this JSON file with the last run summary (default: .ohol_runtime/logs/last_run.json)",
+    )
+    run_live_parser.add_argument(
+        "--session-log-actions",
+        type=int,
+        default=2000,
+        help="Max action records written to the session log (tail of session; 0 = summary only)",
+    )
 
     control_parser = subparsers.add_parser(
         "control",
@@ -294,23 +307,12 @@ def main() -> None:
             watch=args.watch,
             forever=args.forever,
         )
-        if args.watch:
-            from .dashboard import _clear_screen
-
-            _clear_screen()
-        print(
-            json.dumps(
-                {
-                    "survived": result.survived,
-                    "ticks": result.ticks,
-                    "metrics": result.metrics,
-                    "actions": [
-                        {"type": action.type.value, "payload": action.payload}
-                        for action in result.actions
-                    ],
-                },
-                indent=2,
-            )
+        max_actions = max(0, args.session_log_actions)
+        finish_run_live_session(
+            result,
+            watch=args.watch,
+            log_path=args.session_log,
+            max_actions=max_actions,
         )
     elif args.command == "control":
         client = _build_protocol_client(args)

@@ -45,7 +45,9 @@ Build Python bots that play One Hour One Life on a local private server, survive
 | `src/ohol_bot/runner.py` | `run_live_episode` — wall-clock or `--frame-paced` loop |
 | `src/ohol_bot/protocol_messages.py` | Packet parser (PU, PM, FX, MC, CM, …); `done_moving_seq` |
 | `src/ohol_bot/planner.py` | `SurvivalPlanner` — hunger, home, branches, carried-wait |
-| `src/ohol_bot/skills.py` | Forage, explore, return home, collect; adjacent pickup, drop non-food when hungry |
+| `src/ohol_bot/spatial_memory.py` | Working + long-term object landmarks (absolute); biome_id per tile |
+| `src/ohol_bot/resource_memory.py` | Branch/tree landmark matching for collect navigation |
+| `src/ohol_bot/skills.py` | Forage, explore, return home, collect; remembered food/branches when out of range |
 | `src/ohol_bot/manual_control.py` | Interactive terminal control (`control` CLI) |
 | `src/ohol_bot/game_data.py` | Objects/transitions from sandbox |
 | `src/ohol_bot/dashboard.py` | Terminal dashboard for `--watch` |
@@ -69,7 +71,7 @@ $env:PYTHONPATH='src'
 python -m ohol_bot.cli run-live --forever --frame-paced --watch
 ```
 
-Use `--frame-paced` to react once per server `FM` frame (recommended). Use `--tick-seconds N` for slower wall-clock pacing. Use `--forever` to run until Ctrl+C or starvation.
+Use `--frame-paced` to react once per server `FM` frame (recommended). Use `--tick-seconds N` for slower wall-clock pacing. Use `--forever` to run until Ctrl+C or starvation. With `--watch`, Ctrl+C leaves the dashboard visible; a short summary prints and the full run is overwritten to `.ohol_runtime/logs/last_run.json` (tail of actions, size-capped).
 
 **Manual control (no autopilot):**
 

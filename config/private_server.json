@@ -9,7 +9,9 @@
     "secondsPerYear.ini": "60.0",
     "forceEveAge.ini": "18",
     "allowVOGMode.ini": "1",
-    "vogAllowAccounts.ini": "*"
+    "vogAllowAccounts.ini": "*",
+    "minFoodDecrementSeconds.ini": "999999.0",
+    "maxFoodDecrementSeconds.ini": "999999.0"
   },
   "client_settings": {
     "useCustomServer.ini": "1",

@@ -7,6 +7,7 @@ from .biomes import count_biomes_in_radius
 from .game_data import OholGameData
 from .model import Action, ActionType, ObjectState, Observation, PlayerState, Tile, step_toward
 from .movement import next_walkable_step
+from .spatial_memory import SpatialMemory, WORKING_RADIUS, remembered_target_fact
 from .protocol_messages import (
     CravingMessage,
     FoodChangeMessage,
@@ -55,6 +56,7 @@ class WorldState:
     last_move_target: Tile | None = None
     _prev_self_tile: Tile | None = None
     _unchanged_move_ticks: int = 0
+    spatial_memory: SpatialMemory = field(default_factory=SpatialMemory)
 
     def to_absolute(self, tile: Tile) -> Tile:
         if self.birth_tile is None:
@@ -146,6 +148,7 @@ class WorldState:
                 self.pending_held_food_value = picked.food_value
                 self.latched_self_held_object_id = picked.object_id
                 self.expect_empty_hands = False
+            self.spatial_memory.forget_tile(self.to_absolute(tile))
             return
 
         if action.type is ActionType.USE:
@@ -158,6 +161,7 @@ class WorldState:
                 self.pending_held_food_value = picked.food_value
                 self.latched_self_held_object_id = picked.object_id
                 self.expect_empty_hands = False
+            self.spatial_memory.forget_tile(self.to_absolute(tile))
             return
 
         if action.type is ActionType.USE_SELF:
@@ -237,19 +241,13 @@ class WorldState:
                 tile = Tile(change.x, change.y)
                 if change.floor_id is not None:
                     self.tile_floors[tile] = change.floor_id
-                if change.object_id <= 0:
-                    self.tile_objects.pop(tile, None)
-                else:
-                    self.tile_objects[tile] = change.object_id
+                self._ingest_map_object(tile, change.object_id)
         elif isinstance(message, MapChunkMessage):
             for cell in message.cells:
                 tile = Tile(cell.x, cell.y)
                 self.tile_biomes[tile] = cell.biome_id
                 self.tile_floors[tile] = cell.floor_id
-                if cell.object_id <= 0:
-                    self.tile_objects.pop(tile, None)
-                else:
-                    self.tile_objects[tile] = cell.object_id
+                self._ingest_map_object(tile, cell.object_id)
 
     def note_self_spawn(self) -> None:
         if self.self_player_id is None:
@@ -292,7 +290,26 @@ class WorldState:
                 self._unchanged_move_ticks = 0
         self._prev_self_tile = self_player.tile
         self._tick_eat_pending()
-        nearby_objects = self._nearby_objects(self_player.tile, game_data, radius)
+        center_abs = self.to_absolute(self_player.tile)
+        memory_stats = self.spatial_memory.sync(
+            center_abs,
+            self.tile_objects,
+            game_data,
+            self.tick,
+            tile_biomes=self.tile_biomes,
+            radius=radius,
+        )
+        nearby_objects = self._object_states_from_working()
+        nearest_remembered_food = self.spatial_memory.nearest_food(
+            self.spatial_memory.long_term,
+            center_abs,
+        )
+        nearest_remembered_collect = self.spatial_memory.nearest_named(
+            self.spatial_memory.long_term,
+            center_abs,
+            names=set(),
+            collect_landmarks=True,
+        )
         nearby_players = tuple(
             player
             for player_id, player in self.players.items()
@@ -348,6 +365,38 @@ class WorldState:
                     {"x": previous_tile.x, "y": previous_tile.y}
                     if previous_tile is not None
                     else None
+                ),
+                "working_memory_count": memory_stats.working_count,
+                "long_term_memory_count": memory_stats.long_term_count,
+                "long_term_food_count": self.spatial_memory.long_term_food_count(),
+                "memory_promoted_this_tick": memory_stats.promoted_this_tick,
+                "memory_forgotten_this_tick": memory_stats.forgotten_this_tick,
+                "long_term_food_preview": self.spatial_memory.long_term_food_preview(
+                    center_abs
+                ),
+                "nearest_remembered_food": (
+                    remembered_target_fact(
+                        nearest_remembered_food,
+                        center_abs,
+                        self.to_relative,
+                    )
+                    if nearest_remembered_food is not None
+                    else None
+                ),
+                "nearest_remembered_collect": (
+                    remembered_target_fact(
+                        nearest_remembered_collect,
+                        center_abs,
+                        self.to_relative,
+                    )
+                    if nearest_remembered_collect is not None
+                    else None
+                ),
+                "remembered_collect_preview": self.spatial_memory.long_term_collect_preview(
+                    center_abs
+                ),
+                "long_term_by_biome": self.spatial_memory.long_term_by_biome_counts(
+                    game_data
                 ),
             },
         )
@@ -615,36 +664,63 @@ class WorldState:
             return self.latched_self_held_object_id, False
         return None, False
 
+    def _self_center_abs(self) -> Tile | None:
+        if self.self_player_id is None:
+            return None
+        player = self.players.get(self.self_player_id)
+        if player is None:
+            return None
+        return self.to_absolute(player.tile)
+
+    def _ingest_map_object(self, abs_tile: Tile, object_id: int) -> None:
+        if object_id <= 0:
+            self.tile_objects.pop(abs_tile, None)
+            self.spatial_memory.forget_tile(abs_tile)
+            return
+        self.tile_objects[abs_tile] = object_id
+        self.spatial_memory.on_map_update(
+            abs_tile,
+            object_id,
+            game_data=None,
+            tick=self.tick,
+            center_abs=self._self_center_abs(),
+            tile_biomes=self.tile_biomes,
+            radius=WORKING_RADIUS,
+        )
+
+    def _object_states_from_working(self) -> tuple[ObjectState, ...]:
+        objects: list[ObjectState] = []
+        for entry in self.spatial_memory.working.values():
+            rel_tile = self.to_relative(entry.tile)
+            objects.append(
+                ObjectState(
+                    object_id=entry.object_id,
+                    name=entry.name,
+                    tile=rel_tile,
+                    food_value=entry.food_value,
+                    biome_id=self.tile_biomes.get(entry.tile),
+                    floor_id=self.tile_floors.get(entry.tile),
+                )
+            )
+        return tuple(objects)
+
     def _nearby_objects(
         self,
         center: Tile,
         game_data: OholGameData | None,
         radius: int,
     ) -> tuple[ObjectState, ...]:
-        objects: list[ObjectState] = []
+        """Legacy helper: sync spatial memory and return working-memory objects."""
         center_abs = self.to_absolute(center)
-        for tile, object_id in self.tile_objects.items():
-            if center_abs.distance_to(tile) > radius:
-                continue
-            if game_data is not None:
-                obj = game_data.objects.get(object_id)
-                name = obj.name if obj else f"unknown:{object_id}"
-                food_value = obj.food_value if obj else 0
-            else:
-                name = f"object:{object_id}"
-                food_value = 0
-            rel_tile = self.to_relative(tile)
-            objects.append(
-                ObjectState(
-                    object_id=object_id,
-                    name=name,
-                    tile=rel_tile,
-                    food_value=food_value,
-                    biome_id=self.tile_biomes.get(tile),
-                    floor_id=self.tile_floors.get(tile),
-                )
-            )
-        return tuple(objects)
+        self.spatial_memory.sync(
+            center_abs,
+            self.tile_objects,
+            game_data,
+            self.tick,
+            tile_biomes=self.tile_biomes,
+            radius=radius,
+        )
+        return self._object_states_from_working()
 
     def biome_at(self, tile: Tile) -> int | None:
         return self.tile_biomes.get(tile)

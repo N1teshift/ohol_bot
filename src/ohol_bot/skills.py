@@ -107,45 +107,31 @@ class SkillLibrary:
 
         food = observation.nearest_food(exclude=_avoid_targets(observation))
 
-        if food is None:
-
-            return None
-
-        if food.tile in _avoid_targets(observation):
-
-            return None
-
-
-
-        if player.tile == food.tile or _is_adjacent(player.tile, food.tile):
-
+        if food is not None and food.tile not in _avoid_targets(observation):
+            if player.tile == food.tile or _is_adjacent(player.tile, food.tile):
+                return SkillResult(
+                    name="forage_food",
+                    action=Action(
+                        ActionType.PICK_UP,
+                        {"x": food.tile.x, "y": food.tile.y},
+                    ),
+                    reason=f"pick up {food.name}",
+                )
             return SkillResult(
-
                 name="forage_food",
-
-                action=Action(
-
-                    ActionType.PICK_UP,
-
-                    {"x": food.tile.x, "y": food.tile.y},
-
-                ),
-
-                reason=f"pick up {food.name}",
-
+                action=Action(ActionType.MOVE_TO, {"x": food.tile.x, "y": food.tile.y}),
+                reason=f"move to food {food.name}",
             )
 
-
-
-        return SkillResult(
-
-            name="forage_food",
-
-            action=Action(ActionType.MOVE_TO, {"x": food.tile.x, "y": food.tile.y}),
-
-            reason=f"move to food {food.name}",
-
+        remembered = _move_toward_remembered(
+            observation,
+            "nearest_remembered_food",
+            pickup_when_reached=True,
         )
+        if remembered is not None:
+            return remembered
+
+        return None
 
 
 
@@ -177,31 +163,28 @@ class SkillLibrary:
 
         target = _nearest_named_object(observation, names)
 
-        if target is None:
-
-            return None
-
-        if observation.self.tile == target.tile:
-
+        if target is not None:
+            if observation.self.tile == target.tile:
+                return SkillResult(
+                    name="collect_named_object",
+                    action=Action(ActionType.PICK_UP, {"x": target.tile.x, "y": target.tile.y}),
+                    reason=f"pick up {target.name}",
+                )
             return SkillResult(
-
                 name="collect_named_object",
-
-                action=Action(ActionType.PICK_UP, {"x": target.tile.x, "y": target.tile.y}),
-
-                reason=f"pick up {target.name}",
-
+                action=Action(ActionType.MOVE_TO, {"x": target.tile.x, "y": target.tile.y}),
+                reason=f"move to {target.name}",
             )
 
-        return SkillResult(
-
-            name="collect_named_object",
-
-            action=Action(ActionType.MOVE_TO, {"x": target.tile.x, "y": target.tile.y}),
-
-            reason=f"move to {target.name}",
-
+        remembered = _move_toward_remembered(
+            observation,
+            "nearest_remembered_collect",
+            pickup_when_reached=True,
         )
+        if remembered is not None:
+            return remembered
+
+        return None
 
 
 
@@ -283,4 +266,37 @@ def _previous_tile(observation: Observation) -> Tile | None:
     if not isinstance(raw, dict):
         return None
     return Tile(int(raw["x"]), int(raw["y"]))
+
+
+def _move_toward_remembered(
+    observation: Observation,
+    fact_key: str,
+    *,
+    pickup_when_reached: bool = False,
+) -> SkillResult | None:
+    raw = observation.facts.get(fact_key)
+    if not isinstance(raw, dict):
+        return None
+    rel_x = raw.get("rel_x")
+    rel_y = raw.get("rel_y")
+    if rel_x is None or rel_y is None:
+        return None
+    name = str(raw.get("name", "resource"))
+    target = Tile(int(rel_x), int(rel_y))
+    if target in _avoid_targets(observation):
+        return None
+    player = observation.self
+    at_target = player.tile == target
+    adjacent = _is_adjacent(player.tile, target)
+    if pickup_when_reached and (at_target or adjacent):
+        return SkillResult(
+            name="navigate_remembered",
+            action=Action(ActionType.PICK_UP, {"x": target.x, "y": target.y}),
+            reason=f"remembered {name} (pick up)",
+        )
+    return SkillResult(
+        name="navigate_remembered",
+        action=Action(ActionType.MOVE_TO, {"x": target.x, "y": target.y}),
+        reason=f"remembered {name}",
+    )
 

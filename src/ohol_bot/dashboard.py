@@ -102,7 +102,6 @@ def format_dashboard(
         header_tick = f"protocol msgs {observation.tick}"
     elapsed = f"  elapsed {elapsed_seconds:.0f}s" if elapsed_seconds is not None else ""
     planner_hungry = is_planner_hungry(player)
-    craving_text = _format_craving(client, player)
     blocker = forage_blocker(observation)
 
     lines = [
@@ -112,33 +111,38 @@ def format_dashboard(
         f"Account: {client.credentials.email}   Player id: {client.self_player_id}",
         "",
         "Self",
-        f"  Position: ({player.tile.x}, {player.tile.y})",
+        f"  Position: ({player.tile.x}, {player.tile.y})   Home: {_tile_text(observation.home)}",
         f"  Age: {player.age:.2f} years (live estimate, 1yr/{observation.facts.get('age_seconds_per_year', 15):.0f}s)",
-        f"  Age at last PU: {observation.facts.get('age_server_base', player.age):.2f}",
-        f"  Stomach: {player.food_store}/{player.max_food_store} ({player.missing_food_pips} empty base pips)",
-        f"  Yum bonus pips: +{player.yum_bonus}  (effective food: {player.effective_food_points})",
-        f"  Next yum eat bonus: +{player.yum_multiplier} multiplier",
-        f"  Craving: {craving_text}",
-        f"  Planner hungry: {'yes' if planner_hungry else 'no'} (rule: {hunger_rule_text()})",
+        (
+            f"  Stomach: {player.food_store}/{player.max_food_store}   "
+            f"Yum bonus: +{player.yum_bonus}   "
+            f"Next Yum: {_format_next_yum(client, player)}"
+        ),
         f"  Can self-act: {'yes' if can_self_act(player) else f'no (need age {NO_MOVE_AGE}+)'}",
         f"  Stationary: {'yes' if player.is_stationary else 'no (finish move before eating)'}",
         f"  Eat pending: {'yes' if observation.facts.get('eat_pending') else 'no'}",
         f"  Forage blocked by: {blocker or 'nothing — will seek/eat food'}",
-        f"  Held: {held_name}",
+        f"  Holding: {held_name}   Carried by: {carried_by}",
         f"  Held food: {'yes' if player.is_holding_food else 'no'}",
-        f"  Carried by: {carried_by}",
-        f"  Home: {_tile_text(observation.home)}",
         f"  Biome: {_format_biome(observation)}",
         "",
         "World",
-        f"  Tracked tiles: {observation.facts.get('tracked_objects', 0)}",
-        f"  Tracked biome tiles: {observation.facts.get('tracked_biome_tiles', 0)}",
-        f"  Nearby objects: {len(observation.nearby_objects)}",
+        (
+            f"  Tracked tiles: {observation.facts.get('tracked_objects', 0)}   "
+            f"Tracked biome tiles: {observation.facts.get('tracked_biome_tiles', 0)}"
+        ),
+        (
+            f"  Objects in range: {len(observation.nearby_objects)} (radius 24)   "
+            f"Long-term memory: {observation.facts.get('long_term_memory_count', 0)} "
+            f"({observation.facts.get('long_term_food_count', 0)} food)"
+        ),
+        *_format_remembered_landmarks(observation),
         f"  Edible nearby: {len(foods)}",
         f"  Other players nearby: {len(observation.nearby_players)}",
         f"  Nearby biomes: {_format_nearby_biomes(client, observation)}",
         "",
         "Planner",
+        f"  Planner hungry: {'yes' if planner_hungry else 'no'} (rule: {hunger_rule_text()})",
         f"  Last action: {_action_label(last_action)}",
         f"  Reason: {explain_action(observation, last_action)}",
         "",
@@ -170,11 +174,17 @@ def format_dashboard(
     return DashboardFrame(text="\n".join(lines))
 
 
-def print_dashboard(frame: DashboardFrame) -> None:
-    _clear_screen()
+def print_dashboard(frame: DashboardFrame, *, clear: bool = True) -> None:
+    if clear:
+        _clear_screen()
     sys.stdout.write(frame.text)
     sys.stdout.write("\n")
     sys.stdout.flush()
+
+
+def print_dashboard_snapshot(frame: DashboardFrame) -> None:
+    """Re-print the last dashboard without clearing (e.g. after Ctrl+C on Windows)."""
+    print_dashboard(frame, clear=False)
 
 
 def _clear_screen() -> None:
@@ -195,14 +205,21 @@ def _object_name(client: OholProtocolClient, object_id: int | None) -> str:
     return f"object:{object_id}"
 
 
-def _format_craving(client: OholProtocolClient, player) -> str:
-    if player.craving_food_id is None or player.craving_food_id <= 0:
-        return "none"
-    name = _object_name(client, player.craving_food_id)
-    bonus = player.craving_yum_bonus
-    if bonus > 0:
-        return f"{name} (id {player.craving_food_id}, +{bonus} multiplier if eaten)"
-    return f"{name} (id {player.craving_food_id})"
+def _format_next_yum(client: OholProtocolClient, player) -> str:
+    """Craving food plus eat bonus, e.g. 'Carrot +2'; else multiplier or none."""
+    if player.craving_food_id is not None and player.craving_food_id > 0:
+        name = _object_name(client, player.craving_food_id)
+        bonus = (
+            player.craving_yum_bonus
+            if player.craving_yum_bonus > 0
+            else player.yum_multiplier
+        )
+        if bonus > 0:
+            return f"{name} +{bonus}"
+        return name
+    if player.yum_multiplier > 0:
+        return f"+{player.yum_multiplier}"
+    return "none"
 
 
 def _format_held(client: OholProtocolClient, player, observation: Observation) -> str:
@@ -257,6 +274,29 @@ def _nearest_named_object(observation: Observation, names: set[str]) -> ObjectSt
     if not candidates:
         return None
     return min(candidates, key=lambda obj: observation.self.tile.distance_to(obj.tile))
+
+
+def _format_remembered_landmarks(observation: Observation) -> list[str]:
+    lines: list[str] = []
+    for label, key in (
+        ("food", "nearest_remembered_food"),
+        ("collect", "nearest_remembered_collect"),
+    ):
+        nearest = observation.facts.get(key)
+        if not isinstance(nearest, dict):
+            continue
+        lines.append(
+            f"  Nearest remembered {label}: {nearest.get('name', '?')} "
+            f"at ({nearest.get('rel_x')}, {nearest.get('rel_y')})  "
+            f"dist={nearest.get('distance')}  "
+            f"biome={nearest.get('biome_id', '?')}"
+        )
+    by_biome = observation.facts.get("long_term_by_biome")
+    if isinstance(by_biome, dict) and by_biome:
+        top = sorted(by_biome.items(), key=lambda item: -item[1])[:3]
+        summary = ", ".join(f"{name}={count}" for name, count in top)
+        lines.append(f"  Remembered by biome: {summary}")
+    return lines
 
 
 def _format_biome(observation: Observation) -> str:

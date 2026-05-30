@@ -4,6 +4,36 @@ from ohol_bot.planner import SurvivalPlanner
 from ohol_bot.runner import run_episode
 
 
+def test_survival_planner_moves_to_remembered_food_when_hungry() -> None:
+    observation = Observation(
+        tick=0,
+        self=PlayerState(
+            player_id=1,
+            tile=Tile(0, 0),
+            age=18,
+            food_store=3,
+            max_food_store=10,
+            is_stationary=True,
+        ),
+        nearby_objects=(),
+        home=Tile(0, 0),
+        facts={
+            "nearest_remembered_food": {
+                "name": "gooseberry",
+                "rel_x": 4,
+                "rel_y": 0,
+                "distance": 4,
+            }
+        },
+    )
+    client = MockBotClient([observation])
+
+    result = run_episode(client, SurvivalPlanner(), max_ticks=1)
+
+    assert result.actions[0].type is ActionType.MOVE_TO
+    assert result.actions[0].payload == {"x": 4, "y": 0}
+
+
 def test_survival_planner_moves_to_food_when_hungry() -> None:
     observation = Observation(
         tick=0,

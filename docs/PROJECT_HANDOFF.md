@@ -68,7 +68,7 @@ BotClient API (observe, move_to, pick_up, use, use_self, drop, say, wait)
         ↓
 OholProtocolClient (protocol_client.py) — socket, login, read loop, keep-alive, send actions
         ↓
-WorldState (world_state.py) — PU/PM/FX/MC/MX → Observation; birth tile, blocked/avoid
+WorldState (world_state.py) — PU/PM/FX/MC/MX → Observation; birth tile, blocked/avoid; spatial_memory (working + long-term)
         ↓
 protocol_messages.py + protocol_framing.py — parse SN, ACCEPTED, PU, PM, CM, MC, FX, LN, …
         ↓
@@ -101,6 +101,8 @@ ohol_bot/
 │   ├── protocol_messages.py     # Message parser
 │   ├── protocol_framing.py      # Binary MC/CM chunk framing
 │   ├── world_state.py           # Mutable world → Observation; birth tile, move seq, avoid
+│   ├── spatial_memory.py        # Working (radius 24) + long-term map memory (absolute tiles)
+│   ├── resource_memory.py       # Branch/tree landmark names + collect matching helpers
 │   ├── movement.py              # BFS pathfinding around blocksWalking
 │   ├── game_data.py             # objects/ transitions from sandbox
 │   ├── planner.py, skills.py    # SurvivalPlanner + forage/home/collect/explore
@@ -351,6 +353,23 @@ Implementation: `serialize_action()` in `protocol_client.py`.
 
 Skills live in `skills.py`. `WorldState.to_observation()` enriches held items via `game_data.py` (name, `foodValue`), merges pending/latched state, and exposes `avoid_targets`, `blocked_tiles`, `previous_tile`, and `birth_tile` in `observation.facts`.
 
+### Spatial memory (working + long-term)
+
+`spatial_memory.py` sits on top of raw `tile_objects` (absolute coords from MC/MX). **`tile_objects` is unchanged** — pathfinding still uses the full ingest cache.
+
+| Store | Rule | Coordinates |
+|-------|------|-------------|
+| **Working** | Objects within Manhattan distance ≤ 24 of bot absolute position | Absolute keys; `nearby_objects` uses relative tiles for actions |
+| **Long-term** | Tiles that leave working view (bot moved away) | Absolute; `last_seen_tick` updated on promotion |
+
+Sync runs each `to_observation()`. MX/MC clears and optimistic `PICK_UP`/`USE` call `forget_tile`. Long-term is capped at **500** entries and evicts entries older than **3000** ticks.
+
+`observation.facts` includes `working_memory_count`, `long_term_memory_count`, `long_term_food_count`, `nearest_remembered_food`, `nearest_remembered_collect` (with `rel_x`/`rel_y` for navigation), previews, and `long_term_by_biome` counts.
+
+**Landmark resource memory (v1):** long-term entries store `biome_id` at sighting. [`resource_memory.py`](../src/ohol_bot/resource_memory.py) defines branch names and tree-like names (`* Tree`). Planner [`forage_food`](../src/ohol_bot/skills.py) walks toward `nearest_remembered_food` before explore; [`collect_named_object`](../src/ohol_bot/skills.py) walks toward `nearest_remembered_collect` (branches + trees) when nothing is in working range. Priority eviction keeps food/branch/tree landmarks longer under the 500 cap.
+
+**Phase 2:** resource **sites** (tile clusters), biome **attractors** for unseen exploration, fixed regions with object histograms.
+
 ### Terminal dashboard (`--watch`)
 
 Single **Self** panel (no separate “inventory” view). Key lines:
@@ -408,7 +427,8 @@ If `Held` flips from pie → `nothing` while the in-game sprite still holds food
 | Mother-specific carry | Waits when **any** adult carries the bot, not only `mother_id` |
 | `action-probe` | Does not always login before sending actions |
 | Multi-bot live | `family.py` is skeleton only; user deferred second bot |
-| Full map memory | Tracks objects from chunks/changes in radius, not full world |
+| Full map memory | `tile_objects` cache grows with server sends; working/long-term split is explicit but planner still uses `nearby_objects` only |
+| Biome attractors / fixed regions | Landmarks only; `tile_biomes` is flat coords, no regional clustering yet |
 | pytest in CI | May need `pip install pytest` locally |
 | All food edge cases | Gooseberry/berry path verified; sparse biomes may starve during long explore |
 | LN for lineage graph | LN parsed but not used for self id or `mother_id` yet |
