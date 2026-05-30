@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ohol-bot"
+version = "0.1.0"
+description = "Private-server OHOL bot research scaffold"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+ohol-bot = "ohol_bot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

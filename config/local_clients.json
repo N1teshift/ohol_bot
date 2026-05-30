@@ -1,0 +1,17 @@
+{
+  "source_client": ".ohol_runtime\\server",
+  "clients_root": ".ohol_runtime\\clients",
+  "clients": [
+    {
+      "id": "bot_001",
+      "folder": "bot_001",
+      "email": "bot_001@local",
+      "account_key": "aaaa",
+      "client_id": "client_mariusbottest",
+      "server_password": "testPassword",
+      "host": "localhost",
+      "port": 8005,
+      "executable": "OneLife.exe"
+    }
+  ]
+}

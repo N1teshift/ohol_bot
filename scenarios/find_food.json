@@ -1,0 +1,48 @@
+{
+  "name": "find_food",
+  "goal": "Move to nearby food before starving.",
+  "success_metrics": {
+    "survived": true,
+    "min_food_ratio_gt": 0.0
+  },
+  "observations": [
+    {
+      "tick": 0,
+      "self": {
+        "player_id": 1,
+        "tile": { "x": 0, "y": 0 },
+        "age": 18,
+        "food_store": 4,
+        "max_food_store": 12
+      },
+      "home": { "x": 0, "y": 0 },
+      "nearby_objects": [
+        {
+          "object_id": 100,
+          "name": "wild berry",
+          "tile": { "x": 3, "y": 0 },
+          "food_value": 5
+        }
+      ]
+    },
+    {
+      "tick": 1,
+      "self": {
+        "player_id": 1,
+        "tile": { "x": 3, "y": 0 },
+        "age": 18.1,
+        "food_store": 3,
+        "max_food_store": 12
+      },
+      "home": { "x": 0, "y": 0 },
+      "nearby_objects": [
+        {
+          "object_id": 100,
+          "name": "wild berry",
+          "tile": { "x": 3, "y": 0 },
+          "food_value": 5
+        }
+      ]
+    }
+  ]
+}

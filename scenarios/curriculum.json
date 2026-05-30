@@ -1,0 +1,30 @@
+{
+  "curriculum": [
+    {
+      "id": "find_food",
+      "description": "Find and eat nearby food when hunger is low.",
+      "scenario": "scenarios/find_food.json",
+      "metrics": ["survived", "min_food_ratio"]
+    },
+    {
+      "id": "collect_branch",
+      "description": "Collect a branch while fed and near home.",
+      "metrics": ["actions_to_pickup", "distance_from_home"]
+    },
+    {
+      "id": "make_fire",
+      "description": "Exercise recipe planning for early fire chain.",
+      "metrics": ["fire_created", "resource_waste"]
+    },
+    {
+      "id": "farm_berry",
+      "description": "Plant, water, and harvest a berry bush.",
+      "metrics": ["calories_generated", "water_used", "soil_used"]
+    },
+    {
+      "id": "feed_baby",
+      "description": "Keep a nearby baby alive for a fixed window.",
+      "metrics": ["baby_survival_ticks", "caregiver_survival"]
+    }
+  ]
+}

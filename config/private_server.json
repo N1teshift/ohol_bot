@@ -1,0 +1,20 @@
+{
+  "steam_install_path": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\One Hour One Life",
+  "runtime_path": ".ohol_runtime\\server",
+  "host": "localhost",
+  "port": 8005,
+  "settings": {
+    "requireTicketServerCheck.ini": "0",
+    "requireClientPassword.ini": "0",
+    "secondsPerYear.ini": "60.0",
+    "forceEveAge.ini": "18",
+    "allowVOGMode.ini": "1",
+    "vogAllowAccounts.ini": "*"
+  },
+  "client_settings": {
+    "useCustomServer.ini": "1",
+    "customServerAddress.ini": "localhost",
+    "customServerPort.ini": "8005",
+    "vogModeOn.ini": "1"
+  }
+}
