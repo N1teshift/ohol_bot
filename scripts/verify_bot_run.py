@@ -10,9 +10,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from ohol_bot.model import ActionType, Tile
-from ohol_bot.planner import SurvivalPlanner
+from ohol_bot.model import Action, ActionType, Observation, Tile
 from ohol_bot.protocol_client import OholProtocolClient, ProtocolCredentials
+
+
+class MovementSmokePolicy:
+    def decide(self, observation: Observation) -> Action:
+        offsets = (
+            (1, 0),
+            (1, 0),
+            (0, 1),
+            (-1, 0),
+            (-1, 0),
+            (0, -1),
+            (1, 1),
+            (-1, -1),
+        )
+        dx, dy = offsets[observation.tick % len(offsets)]
+        tile = observation.self.tile
+        return Action(ActionType.MOVE_TO, {"x": tile.x + dx, "y": tile.y + dy})
 
 
 def main() -> int:
@@ -26,7 +42,7 @@ def main() -> int:
         ),
         game_data_root=str(ROOT / ".ohol_runtime" / "server"),
     )
-    planner = SurvivalPlanner()
+    policy = MovementSmokePolicy()
 
     client.login()
     client.frame_paced = True
@@ -60,7 +76,7 @@ def main() -> int:
                 survived = False
                 break
 
-            action = planner.decide(observation)
+            action = policy.decide(observation)
             if action.type is ActionType.MOVE_TO:
                 move_targets.append(Tile(action.payload["x"], action.payload["y"]))
             client.send(action)

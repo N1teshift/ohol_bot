@@ -18,6 +18,7 @@ from .protocol_messages import (
     MapChangeMessage,
     MapChunkMessage,
     PlayerMovementMessage,
+    PlayerSaysMessage,
     PlayerUpdateMessage,
     ProtocolMessage,
     ProtocolMessageType,
@@ -449,7 +450,7 @@ class OholProtocolClient(OholProtocolProbe):
                 self._awaiting_force_ack = False
         elif isinstance(message, LineageMessage):
             pass
-        elif isinstance(message, (PlayerUpdateMessage, PlayerMovementMessage, FoodChangeMessage, CravingMessage, MapChangeMessage, MapChunkMessage)):
+        elif isinstance(message, (PlayerUpdateMessage, PlayerMovementMessage, PlayerSaysMessage, FoodChangeMessage, CravingMessage, MapChangeMessage, MapChunkMessage)):
             self.world_state.apply(message)
             if isinstance(message, PlayerUpdateMessage):
                 self._sync_self_from_player_updates(message)

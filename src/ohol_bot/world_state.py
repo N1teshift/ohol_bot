@@ -16,6 +16,7 @@ from .protocol_messages import (
     MapChangeMessage,
     MapChunkMessage,
     PlayerMovementMessage,
+    PlayerSaysMessage,
     PlayerUpdateMessage,
     ProtocolMessage,
 )
@@ -45,6 +46,8 @@ class WorldState:
     self_age_set_at: float | None = None
     self_move_started_at: float | None = None
     birth_tile: Tile | None = None
+    chat_events: list[dict[str, object]] = field(default_factory=list)
+    _chat_sequence: int = 0
     _prev_self_tile: Tile | None = None
     _unchanged_move_ticks: int = 0
     spatial_memory: SpatialMemory = field(default_factory=SpatialMemory)
@@ -216,6 +219,8 @@ class WorldState:
                     new_tile = absolute
                 updates = {"tile": new_tile}
                 self.players[entry.player_id] = replace(player, **updates)
+        elif isinstance(message, PlayerSaysMessage):
+            self._record_chat_event(message)
         elif isinstance(message, FoodChangeMessage):
             if self.self_player_id is None:
                 return
@@ -375,6 +380,7 @@ class WorldState:
                     if previous_tile is not None
                     else None
                 ),
+                "chat_events": tuple(self.chat_events[-20:]),
                 "working_memory_count": memory_stats.working_count,
                 "long_term_memory_count": memory_stats.long_term_count,
                 "long_term_food_count": self.spatial_memory.long_term_food_count(),
@@ -435,6 +441,19 @@ class WorldState:
 
     def take_pending_force(self) -> Tile | None:
         return self.feedback.take_pending_force()
+
+    def _record_chat_event(self, message: PlayerSaysMessage) -> None:
+        if message.player_id is None or not message.text:
+            return
+        self._chat_sequence += 1
+        self.chat_events.append(
+            {
+                "sequence": self._chat_sequence,
+                "player_id": message.player_id,
+                "text": message.text,
+            }
+        )
+        del self.chat_events[:-50]
 
     def _mark_self_moving(self) -> None:
         self._set_self_stationary(False)

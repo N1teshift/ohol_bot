@@ -4,7 +4,7 @@ import sys
 from dataclasses import dataclass
 
 from .model import Action, ActionType, Observation, ObjectState
-from .hunger import NO_MOVE_AGE, action_blocker, can_self_act, forage_blocker, hunger_rule_text, is_planner_hungry
+from .hunger import NO_MOVE_AGE, action_blocker, can_self_act
 from .protocol_client import OholProtocolClient
 
 
@@ -35,16 +35,9 @@ def explain_action(observation: Observation, action: Action | None) -> str:
     if action.type is ActionType.MOVE_TO:
         target_x = action.payload.get("x")
         target_y = action.payload.get("y")
-        if observation.self.is_hungry:
-            food = observation.nearest_food()
-            if food is not None and food.tile.x == target_x and food.tile.y == target_y:
-                return f"moving to food: {food.name} at ({target_x}, {target_y})"
-            return f"exploring east (hungry, no food visible) -> ({target_x}, {target_y})"
-        if observation.home is not None and observation.self.tile.distance_to(observation.home) > 12:
-            return f"returning home -> ({target_x}, {target_y})"
-        branch = _nearest_named_object(observation, {"straight branch", "curved branch"})
-        if branch is not None and branch.tile.x == target_x and branch.tile.y == target_y:
-            return f"moving to collect {branch.name} at ({target_x}, {target_y})"
+        reason = observation.facts.get("follow_reason")
+        if reason:
+            return f"moving to ({target_x}, {target_y}) ({reason})"
         return f"moving to ({target_x}, {target_y})"
 
     if action.type is ActionType.PICK_UP:
@@ -60,12 +53,11 @@ def explain_action(observation: Observation, action: Action | None) -> str:
         if observation.self.is_being_carried:
             carrier_id = observation.self.held_by_player_id
             return f"being carried by player {carrier_id}, waiting"
-        blocker = action_blocker(observation) or forage_blocker(observation)
+        blocker = action_blocker(observation)
         if blocker:
             return f"waiting ({blocker})"
-        if is_planner_hungry(observation.self):
-            return "waiting (hungry, deciding next food action)"
-        return "waiting (stomach full, nothing urgent to do)"
+        reason = observation.facts.get("follow_reason")
+        return f"waiting ({reason or 'idle'})"
 
     return action.type.value
 
@@ -86,9 +78,6 @@ def format_dashboard(
         if player.is_being_carried
         else "nobody"
     )
-    foods = [obj for obj in observation.nearby_objects if obj.food_value > 0]
-    foods.sort(key=lambda obj: player.tile.distance_to(obj.tile))
-
     if tick is not None:
         frame_note = (
             f"   server frames {client.server_frames}"
@@ -101,8 +90,14 @@ def format_dashboard(
     else:
         header_tick = f"protocol msgs {observation.tick}"
     elapsed = f"  elapsed {elapsed_seconds:.0f}s" if elapsed_seconds is not None else ""
-    planner_hungry = is_planner_hungry(player)
-    blocker = forage_blocker(observation)
+    movement_mode = observation.facts.get("movement_mode", "idle")
+    follow_leader_id = observation.facts.get("follow_leader_id")
+    follow_distance = observation.facts.get("follow_leader_distance")
+    follow_target = _format_fact_tile(observation.facts.get("follow_target"))
+    follow_leader_tile = _format_fact_tile(observation.facts.get("follow_leader_tile"))
+    blocked_count = len(observation.facts.get("blocked_tiles", ()))
+    avoid_count = len(observation.facts.get("avoid_targets", ()))
+    blocker = action_blocker(observation)
 
     lines = [
         "OHOL Bot Dashboard",
@@ -113,52 +108,63 @@ def format_dashboard(
         "Self",
         f"  Position: ({player.tile.x}, {player.tile.y})   Home: {_tile_text(observation.home)}",
         f"  Age: {player.age:.2f} years (live estimate, 1yr/{observation.facts.get('age_seconds_per_year', 15):.0f}s)",
-        (
-            f"  Stomach: {player.food_store}/{player.max_food_store}   "
-            f"Yum bonus: +{player.yum_bonus}   "
-            f"Next Yum: {_format_next_yum(client, player)}"
-        ),
-        f"  Can self-act: {'yes' if can_self_act(player) else f'no (need age {NO_MOVE_AGE}+)'}",
-        f"  Stationary: {'yes' if player.is_stationary else 'no (finish move before eating)'}",
-        f"  Eat pending: {'yes' if observation.facts.get('eat_pending') else 'no'}",
-        f"  Forage blocked by: {blocker or 'nothing — will seek/eat food'}",
+        f"  Can move/self-act: {'yes' if can_self_act(player) else f'no (need age {NO_MOVE_AGE}+)'}",
+        f"  Stationary: {'yes' if player.is_stationary else 'no (finish current step)'}",
+        f"  Movement blocker: {blocker or 'none'}",
         f"  Holding: {held_name}   Carried by: {carried_by}",
-        f"  Held food: {'yes' if player.is_holding_food else 'no'}",
         f"  Biome: {_format_biome(observation)}",
         "",
-        "World",
+        "Follow",
+        f"  Movement mode: {movement_mode}",
+        f"  Leader id: {follow_leader_id or 'none'}   Leader tile: {follow_leader_tile}",
+        f"  Leader distance: {follow_distance if follow_distance is not None else 'unknown'}",
+        f"  Follow target: {follow_target}",
+        f"  Reason: {observation.facts.get('follow_reason', 'idle')}",
+        "",
+        "Movement Map",
         (
             f"  Tracked tiles: {observation.facts.get('tracked_objects', 0)}   "
             f"Tracked biome tiles: {observation.facts.get('tracked_biome_tiles', 0)}"
         ),
         (
             f"  Objects in range: {len(observation.nearby_objects)} (radius 24)   "
-            f"Long-term memory: {observation.facts.get('long_term_memory_count', 0)} "
-            f"({observation.facts.get('long_term_food_count', 0)} food)"
+            f"Blocked tiles: {blocked_count}   Avoid targets: {avoid_count}"
         ),
-        *_format_remembered_landmarks(observation),
-        f"  Edible nearby: {len(foods)}",
         f"  Other players nearby: {len(observation.nearby_players)}",
         f"  Nearby biomes: {_format_nearby_biomes(client, observation)}",
         "",
-        "Planner",
-        f"  Planner hungry: {'yes' if planner_hungry else 'no'} (rule: {hunger_rule_text()})",
+        "Last Action",
         f"  Last action: {_action_label(last_action)}",
         f"  Reason: {explain_action(observation, last_action)}",
         "",
-        "Edible nearby (closest first)",
+        "Nearby players",
     ]
 
-    if foods:
-        for obj in foods[:8]:
-            distance = player.tile.distance_to(obj.tile)
-            craving_mark = "  CRAVING" if player.craving_food_id == obj.object_id else ""
+    if observation.nearby_players:
+        nearby = sorted(
+            observation.nearby_players,
+            key=lambda other: player.tile.distance_to(other.tile),
+        )
+        for other in nearby[:8]:
+            distance = player.tile.distance_to(other.tile)
+            leader_mark = "  LEADER" if other.player_id == follow_leader_id else ""
             lines.append(
-                f"  - {obj.name} at ({obj.tile.x}, {obj.tile.y})  dist={distance}  "
-                f"value={obj.food_value}{craving_mark}"
+                f"  - player {other.player_id} at ({other.tile.x}, {other.tile.y})  "
+                f"dist={distance}{leader_mark}"
             )
     else:
         lines.append("  (none within range)")
+
+    foods = [obj for obj in observation.nearby_objects if obj.food_value > 0]
+    if foods:
+        lines.append("")
+        lines.append("Food telemetry (ignored by movement mode)")
+        for obj in sorted(foods, key=lambda obj: player.tile.distance_to(obj.tile))[:4]:
+            distance = player.tile.distance_to(obj.tile)
+            lines.append(
+                f"  - {obj.name} at ({obj.tile.x}, {obj.tile.y})  dist={distance}  "
+                f"value={obj.food_value}"
+            )
 
     lines.extend(
         [
@@ -251,6 +257,16 @@ def _tile_text(tile) -> str:
     if tile is None:
         return "unknown"
     return f"({tile.x}, {tile.y})"
+
+
+def _format_fact_tile(raw) -> str:
+    if not isinstance(raw, dict):
+        return "none"
+    x = raw.get("x")
+    y = raw.get("y")
+    if x is None or y is None:
+        return "none"
+    return f"({x}, {y})"
 
 
 def _action_label(action: Action | None) -> str:

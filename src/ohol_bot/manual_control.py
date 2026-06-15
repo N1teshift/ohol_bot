@@ -36,6 +36,7 @@ class ManualCommandType(str, Enum):
     DROP = "drop"
     SAY = "say"
     WAIT = "wait"
+    CANCEL = "cancel"
     HELP = "help"
     QUIT = "quit"
 
@@ -62,6 +63,7 @@ HELP_TEXT = """Manual control commands:
   drop                     Drop held item
   say <message>            Send chat
   wait [N]                 Wait N ticks (default 1)
+  cancel                   Cancel current queued manual plan (play mode)
   help                     Show this help
   quit / exit              Disconnect
 
@@ -81,6 +83,8 @@ def parse_command(line: str) -> ManualCommand | None:
         return ManualCommand(ManualCommandType.QUIT)
     if verb in {"help", "?"}:
         return ManualCommand(ManualCommandType.HELP)
+    if verb in {"cancel", "stop"}:
+        return ManualCommand(ManualCommandType.CANCEL)
     if verb in {"status", "where", "pos"}:
         return ManualCommand(ManualCommandType.STATUS)
     if verb == "eat":
@@ -278,6 +282,9 @@ def execute_command(
     if command.type is ManualCommandType.WAIT:
         client.send(Action(ActionType.WAIT, {"ticks": command.ticks}))
         return f"wait {command.ticks}"
+
+    if command.type is ManualCommandType.CANCEL:
+        return "no queued plan in control mode"
 
     raise ValueError(f"unsupported command: {command.type}")
 

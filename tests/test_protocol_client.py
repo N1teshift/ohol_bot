@@ -122,6 +122,23 @@ def test_client_updates_tile_from_player_movement() -> None:
     assert client.current_tile == Tile(2, -1)
 
 
+def test_world_state_exposes_chat_events() -> None:
+    world = WorldState()
+    world.self_player_id = 5
+    world.apply(
+        parse_protocol_message(
+            "PU\n5 0 0 0 0 0 0 0 0 0 0 0 0 0 1 2 18.0 15.0 4.0"
+        )
+    )
+    world.apply(parse_protocol_message("PS\n8 follow"))
+
+    observation = world.to_observation()
+
+    assert observation.facts["chat_events"] == (
+        {"sequence": 1, "player_id": 8, "text": "follow"},
+    )
+
+
 def test_world_state_tracks_food_and_map_objects() -> None:
     world = WorldState()
     world.self_player_id = 5

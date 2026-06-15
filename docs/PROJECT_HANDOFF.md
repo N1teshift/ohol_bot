@@ -37,12 +37,12 @@ private server → persistent Python client → live world state → survival pl
 
 **Post-refactor progress (implemented):**
 
-- `RecipeBehavior` now has an opt-in v1 gather mode for early recipe resources.
-- `run-live` supports `--enable-recipe-behavior` and `--recipe-goal-object-id` (transition-driven input names).
-- `recipe_graph.py` provides direct transition lookup for producers of a target object id.
+- `run-live` and `play` now use the movement-first idle/follow policy by default.
+- Incoming `PS` chat is parsed into command events; `follow` starts following the speaker and `stop follow` returns to idle.
+- Recipe/survival behavior is parked as legacy scaffolding instead of driving the live runtime.
 - Movement now considers object `leftBlockingRadius` / `rightBlockingRadius` collision footprints (v1 approximation).
 
-Remaining work is still crafting/recipes, wide collision, and multi-bot coordination.
+Remaining work is smoother trail/formation movement, long-run hunger handling, crafting/recipes, and multi-bot coordination.
 
 **Explicit scope choice:** one live bot first; multi-bot and recipe chains are deferred.
 
@@ -218,7 +218,8 @@ $env:PYTHONPATH='src'
 
 | Command | Purpose |
 |---------|---------|
-| `run-live` | **Main loop:** login, read packets, planner tick, send actions. `--watch` shows dashboard. `--forever` runs until Ctrl+C. |
+| `run-live` | **Movement loop:** login, read packets, idle/follow policy, send movement actions. `--watch` shows dashboard. `--forever` runs until Ctrl+C. |
+| `play` | **Unified mode:** frame-paced idle/follow + dashboard + one-shot manual command overrides from `cmd>` prompt. |
 | `control` | **Manual control:** interactive REPL — `move 10 east`, `go south 6`, `goto x y`, `pick`, `eat`, `status`. No autopilot planner. |
 | `stay-alive` | Stay connected; optional `--say`, `--move-x/y`, `--watch` |
 | `verify-live` | Automated say / move / eat checks |
@@ -227,7 +228,7 @@ $env:PYTHONPATH='src'
 | `run-scenario` | Mock survival demo from `scenarios/*.json` |
 | `parse-server-log` | Parse server terminal log |
 
-**Script (not CLI subcommand):** `python scripts/verify_bot_run.py [max_ticks]` — runs the live bot and **fails if stuck** (same tile too long, spamming one move target, too many invalid paths). Run after movement/pathfinding changes. Server must be up.
+**Scripts (not CLI subcommands):** `python scripts/verify_bot_run.py [max_ticks]` runs a movement-only smoke policy and **fails if stuck** (same tile too long, spamming one move target, too many invalid paths). `python scripts/verify_follow_mode.py <leader_player_id> [max_ticks]` checks distance-band follow behavior against a known live leader. Server must be up.
 
 ### Recommended live session
 
@@ -240,16 +241,23 @@ $env:PYTHONPATH='src'
 python -m ohol_bot.cli run-live --forever --frame-paced --watch
 ```
 
+### Unified interactive session (autopilot + manual overrides)
+
+```powershell
+$env:PYTHONPATH='src'
+python -m ohol_bot.cli play
+```
+
+At `cmd>` you can use manual-control commands (`move`, `goto`, `pick`, `eat`, `status`, `help`, `quit`). In-game chat command `follow` from another player switches the bot into follow mode; `stop follow` returns it to idle. Manual terminal commands override one step, then the movement policy resumes.
+
 Notes:
 
-- **`--forever`**: runs until Ctrl+C or starvation; ignores `--max-ticks`.
-- **`--max-ticks N`**: ends the session after N planner ticks via graceful `close()` — not a server crash.
-- **`--frame-paced`**: one planner step per server **`FM`** frame (recommended for speed; ignores `--tick-seconds`).
+- **`--forever`**: runs until Ctrl+C; ignores `--max-ticks`.
+- **`--max-ticks N`**: ends the session after N movement ticks via graceful `close()` — not a server crash.
+- **`--frame-paced`**: one movement decision per server **`FM`** frame (recommended for speed; ignores `--tick-seconds`).
 - **`--tick-seconds`**: wall-clock polling interval when not using `--frame-paced` (default `1.0`; each action also waits again after send).
-- **`--watch`**: terminal dashboard (position, hunger, held item, planner reason).
+- **`--watch`**: terminal dashboard (position, movement mode, leader, follow target, blocked/avoid counts).
 - **`--game-data-root`**: defaults to `.ohol_runtime/server` for object names, `foodValue`, and `blocksWalking` pathfinding.
-- **`--enable-recipe-behavior`**: enables opt-in recipe gather behavior layer.
-- **`--recipe-goal-object-id <id>`**: if recipe behavior is enabled, derives gather targets from one-step transitions that produce this object id.
 
 ### Manual control session
 

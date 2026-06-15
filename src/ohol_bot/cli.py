@@ -5,14 +5,14 @@ import json
 from pathlib import Path
 
 from .client import MockBotClient
-from .behaviors import RecipeBehavior
 from .live_behaviors import verify_live_behaviors
 from .manual_control import run_manual_control
+from .movement_policy import MovementFollowPolicy
 from .planner import SurvivalPlanner
 from .model import Action, ActionType, Tile
 from .protocol_client import OholProtocolClient, OholProtocolProbe, ProtocolCredentials
-from .runner import run_episode, run_live_episode
-from .session_log import finish_run_live_session
+from .runner import run_episode, run_live_episode, run_live_interactive_episode
+from .session_log import finish_play_session, finish_run_live_session
 from .scenario import load_scenario
 from .server_log import connected_accounts, parse_server_log
 
@@ -87,17 +87,6 @@ def main() -> None:
         default=".ohol_runtime/server",
         help="Sandbox path containing objects/ and transitions/",
     )
-    run_live_parser.add_argument(
-        "--enable-recipe-behavior",
-        action="store_true",
-        help="Enable opt-in recipe gather behavior",
-    )
-    run_live_parser.add_argument(
-        "--recipe-goal-object-id",
-        type=int,
-        default=None,
-        help="Target output object id for transition-driven recipe inputs",
-    )
     run_live_parser.add_argument("--watch", action="store_true")
     run_live_parser.add_argument(
         "--session-log",
@@ -110,6 +99,44 @@ def main() -> None:
         type=int,
         default=2000,
         help="Max action records written to the session log (tail of session; 0 = summary only)",
+    )
+
+    play_parser = subparsers.add_parser(
+        "play",
+        help="Unified autopilot + manual one-shot overrides with dashboard",
+    )
+    _add_connection_args(play_parser)
+    play_parser.add_argument("--max-ticks", type=int, default=20)
+    play_parser.add_argument(
+        "--forever",
+        action="store_true",
+        default=True,
+        help="Run until Ctrl+C or manual quit",
+    )
+    play_parser.add_argument("--tick-seconds", type=float, default=1.0)
+    play_parser.add_argument(
+        "--frame-paced",
+        action="store_true",
+        default=True,
+        help="React once per server FM frame",
+    )
+    play_parser.add_argument("--keep-alive-interval", type=float, default=5.0)
+    play_parser.add_argument(
+        "--game-data-root",
+        default=".ohol_runtime/server",
+        help="Sandbox path containing objects/ and transitions/",
+    )
+    play_parser.add_argument(
+        "--session-log",
+        type=Path,
+        default=Path(".ohol_runtime/logs/last_play.json"),
+        help="Overwrite this JSON file with the last play summary",
+    )
+    play_parser.add_argument(
+        "--session-log-actions",
+        type=int,
+        default=2000,
+        help="Max action records written to the play session log (tail of session; 0 = summary only)",
     )
 
     control_parser = subparsers.add_parser(
@@ -312,7 +339,7 @@ def main() -> None:
         )
         result = run_live_episode(
             client,
-            _build_run_live_planner(args, client),
+            _build_run_live_policy(),
             args.max_ticks,
             tick_seconds=args.tick_seconds,
             frame_paced=args.frame_paced,
@@ -334,6 +361,24 @@ def main() -> None:
             frame_paced=args.frame_paced,
             watch=args.watch,
             initial_commands=initial_commands,
+        )
+    elif args.command == "play":
+        client = _build_protocol_client(args)
+        result = run_live_interactive_episode(
+            client,
+            _build_run_live_policy(),
+            args.max_ticks,
+            tick_seconds=args.tick_seconds,
+            frame_paced=args.frame_paced,
+            watch=True,
+            forever=args.forever,
+        )
+        max_actions = max(0, args.session_log_actions)
+        finish_play_session(
+            result,
+            watch=True,
+            log_path=args.session_log,
+            max_actions=max_actions,
         )
     elif args.command == "verify-live":
         client = OholProtocolClient(
@@ -406,24 +451,8 @@ def _build_protocol_client(args: argparse.Namespace) -> OholProtocolClient:
     )
 
 
-def _build_run_live_planner(
-    args: argparse.Namespace,
-    client: OholProtocolClient,
-) -> SurvivalPlanner:
-    enable_recipe = bool(getattr(args, "enable_recipe_behavior", False))
-    goal_object_id = getattr(args, "recipe_goal_object_id", None)
-    recipe_resource_names: frozenset[str] | None = None
-
-    if enable_recipe and goal_object_id is not None and client.game_data is not None:
-        recipe_resource_names = RecipeBehavior.resources_for_goal(
-            client.game_data,
-            output_id=int(goal_object_id),
-        )
-
-    return SurvivalPlanner(
-        enable_recipe_behavior=enable_recipe,
-        recipe_resource_names=recipe_resource_names,
-    )
+def _build_run_live_policy() -> MovementFollowPolicy:
+    return MovementFollowPolicy()
 
 
 def _build_probe_action(action_type: str, args: argparse.Namespace) -> Action:

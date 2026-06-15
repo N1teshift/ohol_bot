@@ -2,6 +2,7 @@ from ohol_bot.protocol_messages import (
     FoodChangeMessage,
     LineageMessage,
     MapChangeMessage,
+    PlayerSaysMessage,
     PlayerMovementMessage,
     PlayerUpdateMessage,
     ProtocolMessageType,
@@ -93,3 +94,20 @@ def test_parse_lineage_message_lists_last_line_id_only() -> None:
 
     assert isinstance(message, LineageMessage)
     assert message.player_id == 14
+
+
+def test_parse_player_says_message() -> None:
+    message = parse_protocol_message("PS\n8 follow")
+
+    assert isinstance(message, PlayerSaysMessage)
+    assert message.type is ProtocolMessageType.PLAYER_SAYS
+    assert message.player_id == 8
+    assert message.text == "follow"
+
+
+def test_parse_player_says_message_with_position_fields() -> None:
+    message = parse_protocol_message("PS\n8 0 0 stop follow")
+
+    assert isinstance(message, PlayerSaysMessage)
+    assert message.player_id == 8
+    assert message.text == "stop follow"

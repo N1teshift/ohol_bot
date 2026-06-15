@@ -6,7 +6,7 @@ from ohol_bot.protocol_messages import (
     ProtocolMessageType,
 )
 from ohol_bot.runner import run_live_episode
-from ohol_bot.planner import SurvivalPlanner
+from ohol_bot.movement_policy import MovementFollowPolicy
 
 
 def test_batch_has_frame_detects_top_level_fm() -> None:
@@ -111,7 +111,7 @@ def test_frame_paced_runner_waits_per_frame_not_tick_seconds() -> None:
     client = FramePacedStub()
     result = run_live_episode(
         client,
-        SurvivalPlanner(),
+        MovementFollowPolicy(),
         max_ticks=2,
         frame_paced=True,
     )

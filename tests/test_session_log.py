@@ -56,3 +56,22 @@ def test_write_session_log_overwrites_and_respects_size(tmp_path: Path) -> None:
     summary = terminal_summary(report, log_path)
     assert "Session ended" in summary
     assert str(log_path.resolve()) in summary
+
+
+def test_build_episode_report_includes_events_when_present() -> None:
+    result = EpisodeResult(
+        ticks=2,
+        actions=(Action(ActionType.WAIT, {"ticks": 1}),),
+        survived=True,
+        metrics={},
+        events=(
+            {"tick": 0, "event": "manual_plan_move", "steps": 10},
+            {"tick": 1, "event": "manual_plan_cancelled"},
+        ),
+    )
+
+    report = build_episode_report(result, max_actions=10)
+
+    assert report["events_total"] == 2
+    assert len(report["events"]) == 2
+    assert report["events"][0]["event"] == "manual_plan_move"

@@ -39,6 +39,7 @@ def test_parse_goto() -> None:
 
 def test_parse_status_and_quit() -> None:
     assert parse_command("status").type is ManualCommandType.STATUS
+    assert parse_command("cancel").type is ManualCommandType.CANCEL
     assert parse_command("quit").type is ManualCommandType.QUIT
 
 

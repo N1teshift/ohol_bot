@@ -75,6 +75,13 @@ class PlayerMovementMessage(ProtocolMessage):
 
 
 @dataclass(frozen=True, slots=True)
+class PlayerSaysMessage(ProtocolMessage):
+    player_id: int | None = None
+    text: str = ""
+    raw_fields: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class CompressedMessage(ProtocolMessage):
     decompressed: tuple[ProtocolMessage, ...] = ()
 
@@ -163,7 +170,7 @@ def parse_protocol_message(frame: str) -> ProtocolMessage:
     if head == "PM":
         return _parse_player_movement(normalized)
     if head == "PS":
-        return ProtocolMessage(ProtocolMessageType.PLAYER_SAYS, normalized)
+        return _parse_player_says(normalized)
     if head == "CM":
         return _parse_compressed(normalized)
     if head == "MC":
@@ -286,6 +293,23 @@ def _parse_player_movement(raw: str) -> PlayerMovementMessage:
             )
         )
     return PlayerMovementMessage(ProtocolMessageType.PLAYER_MOVEMENT, raw, tuple(entries))
+
+
+def _parse_player_says(raw: str) -> PlayerSaysMessage:
+    lines = raw.splitlines()
+    payload = lines[1].strip() if len(lines) > 1 else raw.split(maxsplit=1)[1] if " " in raw else ""
+    fields = tuple(field for field in payload.split() if field)
+    player_id = _safe_int(fields[0], None) if fields else None
+    text_fields = fields[1:] if player_id is not None else fields
+    if len(text_fields) >= 3 and _safe_int(text_fields[0], None) is not None and _safe_int(text_fields[1], None) is not None:
+        text_fields = text_fields[2:]
+    return PlayerSaysMessage(
+        ProtocolMessageType.PLAYER_SAYS,
+        raw,
+        player_id=player_id,
+        text=" ".join(text_fields).strip(),
+        raw_fields=fields,
+    )
 
 
 def _parse_compressed(raw: str) -> CompressedMessage:

@@ -9,6 +9,7 @@ from .model import Action
 from .runner import EpisodeResult
 
 DEFAULT_SESSION_LOG_PATH = Path(".ohol_runtime/logs/last_run.json")
+DEFAULT_PLAY_LOG_PATH = Path(".ohol_runtime/logs/last_play.json")
 MAX_ACTIONS_IN_LOG = 2000
 MAX_LOG_BYTES = 2_000_000
 
@@ -31,7 +32,7 @@ def build_episode_report(
         saved = [action_to_dict(action) for action in tail]
         omitted = total - len(tail)
 
-    return {
+    report = {
         "ended_at": datetime.now(timezone.utc).isoformat(),
         "stopped_by": result.stop_reason,
         "survived": result.survived,
@@ -42,6 +43,10 @@ def build_episode_report(
         "actions_omitted": omitted,
         "actions": saved,
     }
+    if result.events:
+        report["events_total"] = len(result.events)
+        report["events"] = [dict(event) for event in result.events]
+    return report
 
 
 def write_session_log(
@@ -96,6 +101,29 @@ def finish_run_live_session(
     *,
     watch: bool,
     log_path: Path | str = DEFAULT_SESSION_LOG_PATH,
+    max_actions: int = MAX_ACTIONS_IN_LOG,
+    print_summary: bool = True,
+) -> Path:
+    report = build_episode_report(result, max_actions=max_actions)
+    written = write_session_log(report, log_path)
+    if watch and result.last_dashboard:
+        from .dashboard import DashboardFrame, print_dashboard_snapshot
+
+        print()
+        print("--- Final dashboard snapshot ---")
+        print_dashboard_snapshot(DashboardFrame(result.last_dashboard))
+    if watch:
+        print()
+    if print_summary:
+        print(terminal_summary(report, written))
+    return written
+
+
+def finish_play_session(
+    result: EpisodeResult,
+    *,
+    watch: bool,
+    log_path: Path | str = DEFAULT_PLAY_LOG_PATH,
     max_actions: int = MAX_ACTIONS_IN_LOG,
     print_summary: bool = True,
 ) -> Path:
