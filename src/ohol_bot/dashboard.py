@@ -85,10 +85,13 @@ def format_dashboard(
             else ""
         )
         header_tick = (
-            f"planner tick {tick}   protocol msgs {observation.tick}{frame_note}"
+            f"planner tick {tick}   protocol msgs {observation.tick}{frame_note}   "
+            f"KA pings {client._sent_keep_alives}"
         )
     else:
-        header_tick = f"protocol msgs {observation.tick}"
+        header_tick = (
+            f"protocol msgs {observation.tick}   KA pings {client._sent_keep_alives}"
+        )
     elapsed = f"  elapsed {elapsed_seconds:.0f}s" if elapsed_seconds is not None else ""
     movement_mode = observation.facts.get("movement_mode", "idle")
     follow_leader_id = observation.facts.get("follow_leader_id")
@@ -98,6 +101,14 @@ def format_dashboard(
     blocked_count = len(observation.facts.get("blocked_tiles", ()))
     avoid_count = len(observation.facts.get("avoid_targets", ()))
     blocker = action_blocker(observation)
+    last_chat = _format_last_chat(observation)
+    goal = _format_goal(
+        movement_mode=movement_mode,
+        leader_id=follow_leader_id,
+        leader_tile=follow_leader_tile,
+        leader_distance=follow_distance,
+        follow_target=follow_target,
+    )
 
     lines = [
         "OHOL Bot Dashboard",
@@ -108,18 +119,20 @@ def format_dashboard(
         "Self",
         f"  Position: ({player.tile.x}, {player.tile.y})   Home: {_tile_text(observation.home)}",
         f"  Age: {player.age:.2f} years (live estimate, 1yr/{observation.facts.get('age_seconds_per_year', 15):.0f}s)",
-        f"  Can move/self-act: {'yes' if can_self_act(player) else f'no (need age {NO_MOVE_AGE}+)'}",
-        f"  Stationary: {'yes' if player.is_stationary else 'no (finish current step)'}",
-        f"  Movement blocker: {blocker or 'none'}",
+        (
+            f"  Can move/self-act: {'yes' if can_self_act(player) else f'no (need age {NO_MOVE_AGE}+)'}   "
+            f"Stationary: {'yes' if player.is_stationary else 'no (finish current step)'}"
+        ),
+        f"  Action blocked by: {blocker or 'nothing'}",
         f"  Holding: {held_name}   Carried by: {carried_by}",
         f"  Biome: {_format_biome(observation)}",
         "",
-        "Follow",
-        f"  Movement mode: {movement_mode}",
-        f"  Leader id: {follow_leader_id or 'none'}   Leader tile: {follow_leader_tile}",
-        f"  Leader distance: {follow_distance if follow_distance is not None else 'unknown'}",
-        f"  Follow target: {follow_target}",
-        f"  Reason: {observation.facts.get('follow_reason', 'idle')}",
+        "Actions",
+        f"  Goal: {goal}",
+        f"  Last chat: {last_chat}",
+        f"  Last action: {_action_label(last_action)}",
+        f"  Actions sent: {client._actions_sent}",
+        f"  Status: {explain_action(observation, last_action)}",
         "",
         "Movement Map",
         (
@@ -130,12 +143,7 @@ def format_dashboard(
             f"  Objects in range: {len(observation.nearby_objects)} (radius 24)   "
             f"Blocked tiles: {blocked_count}   Avoid targets: {avoid_count}"
         ),
-        f"  Other players nearby: {len(observation.nearby_players)}",
         f"  Nearby biomes: {_format_nearby_biomes(client, observation)}",
-        "",
-        "Last Action",
-        f"  Last action: {_action_label(last_action)}",
-        f"  Reason: {explain_action(observation, last_action)}",
         "",
         "Nearby players",
     ]
@@ -143,10 +151,10 @@ def format_dashboard(
     if observation.nearby_players:
         nearby = sorted(
             observation.nearby_players,
-            key=lambda other: player.tile.distance_to(other.tile),
+            key=lambda other: _chebyshev(player.tile, other.tile),
         )
         for other in nearby[:8]:
-            distance = player.tile.distance_to(other.tile)
+            distance = _chebyshev(player.tile, other.tile)
             leader_mark = "  LEADER" if other.player_id == follow_leader_id else ""
             lines.append(
                 f"  - player {other.player_id} at ({other.tile.x}, {other.tile.y})  "
@@ -166,16 +174,7 @@ def format_dashboard(
                 f"value={obj.food_value}"
             )
 
-    lines.extend(
-        [
-            "",
-            "Connection",
-            f"  Keep-alives sent: {client._sent_keep_alives}",
-            f"  Actions sent: {client._actions_sent}",
-            "",
-            "Ctrl+C to stop",
-        ]
-    )
+    lines.extend(["", "Ctrl+C to stop"])
 
     return DashboardFrame(text="\n".join(lines))
 
@@ -267,6 +266,39 @@ def _format_fact_tile(raw) -> str:
     if x is None or y is None:
         return "none"
     return f"({x}, {y})"
+
+
+def _chebyshev(a: Tile, b: Tile) -> int:
+    return max(abs(a.x - b.x), abs(a.y - b.y))
+
+
+def _format_goal(
+    *,
+    movement_mode,
+    leader_id,
+    leader_tile: str,
+    leader_distance,
+    follow_target: str,
+) -> str:
+    if movement_mode != "follow" or leader_id is None:
+        return "none"
+    distance = leader_distance if leader_distance is not None else "unknown"
+    return (
+        f"follow target {follow_target}, leader {leader_id} at {leader_tile}, "
+        f"dist={distance}"
+    )
+
+
+def _format_last_chat(observation: Observation) -> str:
+    raw = observation.facts.get("chat_events")
+    if not isinstance(raw, tuple) or not raw:
+        return "none"
+    event = raw[-1]
+    if not isinstance(event, dict):
+        return "none"
+    player_id = event.get("player_id", "?")
+    text = event.get("text", "")
+    return f"player {player_id}: {text}"
 
 
 def _action_label(action: Action | None) -> str:

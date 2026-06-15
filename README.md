@@ -30,6 +30,10 @@ python -m ohol_bot.cli run-live --forever --frame-paced --watch
 Say `follow` in game from the player you want the bot to follow. Say `stop follow`
 to return the bot to idle.
 
+While following, the bot waits on the same tile as the leader or any adjacent
+tile (Chebyshev distance <= 1). It only moves when the leader is 2+ tiles away,
+pathing toward a walkable tile exactly one step from the leader.
+
 **Terminal 2 — unified follow + manual override mode:**
 
 ```powershell
@@ -82,24 +86,23 @@ One-shot: `python -m ohol_bot.cli control move 10 east`. Add `--watch` for the d
 - **LiveSessionEngine orchestration** for `run-live` loop pacing and stop reasons (while preserving CLI behavior)
 - **World state** from PU, PM, FX, MC, MX (position, hunger, map objects, players)
 - **World/action state split started**: `WorldState` (packet-derived) + `ActionFeedbackState` (move/eat/force feedback)
-- **Movement follow policy** live: idle by default, follow the player who says `follow`, return to idle on `stop follow`
+- **Movement follow policy** live: idle by default, follow the player who says `follow`, return to idle on `stop follow`; wait at distance <= 1, move at distance >= 2
 - **Structured chat parsing** for `PS` command events
 - **Typed planner-facts adapter** (`planner_facts.py`) used by skills for avoid/blocked/remembered targets
 - **Behavior-layer scaffold** (`behaviors.py`): `SurvivalBehavior` active, `RecipeBehavior` skeleton for next feature
-- **Obstacle-aware pathfinding** (`movement.py`): 8-way BFS around `blocksWalking`, birth-relative coords, corner-cutting, approach tiles for blocked food
-- **Wide collision v1**: uses `leftBlockingRadius`/`rightBlockingRadius` footprints when checking walkability
-- **Stuck avoidance:** `avoid_targets` / `blocked_tiles`, rotating explore, adjacent pickup even when a food tile was avoided for walking
+- **Obstacle-aware pathfinding** (`movement.py`): 8-way BFS around `blocksWalking`, diagonal straight-line prefixes, birth-relative coords, corner-cutting, approach tiles for blocked food
+- **Wide collision v1**: horizontal-only footprints from `leftBlockingRadius`/`rightBlockingRadius` when checking walkability
+- **Stuck avoidance:** `blocked_tiles` hard-block walking; `avoid_targets` hard-skip explore/survival paths but are a soft penalty for follow formation targets
 - **`--frame-paced` loop**: one movement decision per server **`FM`** frame; recommended for live play
-- **Movement pacing**: one tile per `MOVE`; planner waits while `is_stationary=false`; MOVE blocked while in-flight or awaiting FORCE ack
+- **Movement pacing**: one policy decision per stationary frame; each `MOVE` may encode a short batched path (cardinal + diagonal offsets, up to 6 steps) when the path is clear
 - **Self player detection**: locked from first solo PU or first PM after our MOVE — **not** from LN
 - **Action coordinates**: `_action_tile` + `birth_tile` offset for map (absolute) vs MOVE (relative) coords
-- **Movement dashboard** (`--watch`): mode, leader, distance, target, blocked/avoid counts
+- **Movement dashboard** (`--watch`): goal, last chat, action status, Chebyshev leader/player distance, follow target, blocked/avoid counts
 - **Manual control** (`control` CLI)
 - **`scripts/verify_bot_run.py`**: automated stuck detection after movement changes
 - Game data loader (~4400 objects, transitions) from `.ohol_runtime/server`
 - Mock scenarios and unit tests under `tests/`
-- Full regression suite currently passing: `111` tests
-- Full regression suite currently passing: `123` tests
+- Full regression suite currently passing: `148` tests
 
 ## Bot API
 
@@ -171,7 +174,7 @@ Separate credentials per bot copy avoid Steam single-session disconnects.
 | Basic survival (food, home, branches) | Done |
 | Live forage → pick up → eat (`USE_SELF`) | **Verified** |
 | `--frame-paced` + movement gating | **Verified** |
-| Obstacle-aware pathfinding (basic BFS) | **Done** (no wide collision yet) |
+| Obstacle-aware pathfinding (8-way BFS + diagonal prefixes) | Done |
 | Stuck-on-tree avoidance + verify script | **Done** |
 | Manual terminal control | **Done** |
 | Self-id + action-tile + birth-tile coords | Done |
@@ -182,9 +185,8 @@ Separate credentials per bot copy avoid Steam single-session disconnects.
 | Behavior-layer scaffold | Done |
 | RecipeBehavior v1 (opt-in gather) | Done |
 | Transition-driven recipe input selection | Done |
-| Wide collision footprint checks | Done (v1 approximation) |
+| Wide collision footprint checks | Done (horizontal v1) |
 | Recipe / transition planner (fire, tools) | Not started |
 | Multi-bot family coordinator | Skeleton only |
-| Wide collision / leftBlockingRadius | Not started |
 
 See [docs/PROJECT_HANDOFF.md](docs/PROJECT_HANDOFF.md) for protocol details and next steps.

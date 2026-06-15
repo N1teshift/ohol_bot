@@ -1,5 +1,13 @@
+from ohol_bot.biomes import BiomeCatalog
+from ohol_bot.game_data import OholGameData
 from ohol_bot.model import Action, ActionType, Tile
-from ohol_bot.protocol_client import OholProtocolClient, ProtocolCredentials, serialize_action
+from ohol_bot.protocol_client import (
+    OholProtocolClient,
+    ProtocolCredentials,
+    _player_says_from_server_log_line,
+    _self_player_id_from_server_log_line,
+    serialize_action,
+)
 from ohol_bot.protocol_messages import PlayerUpdateMessage, ProtocolMessageType, parse_protocol_message
 from ohol_bot.world_state import WorldState
 
@@ -66,6 +74,43 @@ def test_client_tracks_self_player_from_first_player_update() -> None:
     assert client._action_tile == Tile(10, 20)
 
 
+def test_client_uses_first_player_update_age_for_self_estimate() -> None:
+    client = OholProtocolClient()
+    client._dispatch_message(
+        parse_protocol_message("PU\n13 0 0 0 0 0 0 0 0 0 0 0 0 0 10 20 0.5 15.0 4.0")
+    )
+
+    observation = client.world_state.to_observation()
+
+    assert 0.5 <= observation.self.age < 0.7
+    assert observation.facts["age_server_base"] == 0.5
+
+
+def test_client_uses_server_log_identity_over_first_solo_pu(tmp_path) -> None:
+    server_root = tmp_path
+    log_path = server_root / "log.txt"
+    log_path.write_text("", encoding="utf-8")
+    client = OholProtocolClient(
+        game_data=OholGameData(objects={}, transitions=(), biomes=BiomeCatalog({})),
+        game_data_root=str(server_root),
+    )
+    log_path.write_text(
+        "L4 | now | general | Player 106 (bot_001@local) has reconnected.\n",
+        encoding="utf-8",
+    )
+
+    client._poll_server_log_events()
+    client._dispatch_message(
+        parse_protocol_message("PU\n105 0 0 0 0 0 0 0 0 0 0 0 0 0 -1 0 47.0 60.0 4.0")
+    )
+    client._dispatch_message(
+        parse_protocol_message("PU\n106 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 18.0 60.0 4.0")
+    )
+
+    assert client.self_player_id == 106
+    assert client.current_tile == Tile(0, 0)
+
+
 def test_lineage_does_not_overwrite_self_player_id() -> None:
     client = OholProtocolClient()
     client._dispatch_message(
@@ -98,6 +143,26 @@ def test_move_serializes_one_tile_step_toward_target() -> None:
 
     assert message == "MOVE 7 0 @1 1 0#"
     assert client._action_tile == Tile(7, 0)
+
+
+def test_move_serializes_batched_path_offsets() -> None:
+    client = OholProtocolClient()
+    client._action_tile = Tile(7, 0)
+
+    message = serialize_action(
+        Action(
+            ActionType.MOVE_TO,
+            {
+                "x": 11,
+                "y": 0,
+                "sequence": 1,
+                "path": (Tile(8, 0), Tile(9, 0), Tile(10, 0)),
+            },
+        ),
+        client,
+    )
+
+    assert message == "MOVE 7 0 @1 1 0 2 0 3 0#"
 
 
 def test_move_updates_action_tile_for_followup_actions() -> None:
@@ -136,6 +201,40 @@ def test_world_state_exposes_chat_events() -> None:
 
     assert observation.facts["chat_events"] == (
         {"sequence": 1, "player_id": 8, "text": "follow"},
+    )
+
+
+def test_server_log_say_line_becomes_player_says_message() -> None:
+    message = _player_says_from_server_log_line(
+        "L4 | now | general | Got client message from 105: SAY 0 0 FOLLOW"
+    )
+
+    assert message is not None
+    assert message.player_id == 105
+    assert message.text == "FOLLOW"
+
+
+def test_server_log_identity_parses_connection_and_reconnect() -> None:
+    assert (
+        _self_player_id_from_server_log_line(
+            "L4 | now | general | New player bot_001@local connected as player 106 (tutorial=0) (-441,-182)",
+            account="bot_001@local",
+        )
+        == 106
+    )
+    assert (
+        _self_player_id_from_server_log_line(
+            "L4 | now | general | Player 106 (bot_001@local) has reconnected.",
+            account="bot_001@local",
+        )
+        == 106
+    )
+    assert (
+        _self_player_id_from_server_log_line(
+            "L4 | now | general | Player 105 (human@local) has reconnected.",
+            account="bot_001@local",
+        )
+        is None
     )
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 
 from .game_data import OholObject
-from .model import Tile, step_toward
+from .model import Tile
 
 _NEIGHBOR_OFFSETS = (
     (1, 0),
@@ -20,9 +20,8 @@ _NEIGHBOR_OFFSETS = (
 def blocking_footprint_tiles(origin: Tile, obj: OholObject) -> tuple[Tile, ...]:
     """Tiles blocked by an object's collision footprint.
 
-    OHOL object files expose left/right blocking radii. We model these as an
-    asymmetric footprint around the object tile on the x-axis, with a vertical
-    radius equal to the larger side radius.
+    OHOL object files expose left/right blocking radii on the x-axis. Keep this
+    footprint horizontal so tall-looking sprites do not over-block tight paths.
     """
     if not obj.blocks_walking:
         return ()
@@ -30,11 +29,9 @@ def blocking_footprint_tiles(origin: Tile, obj: OholObject) -> tuple[Tile, ...]:
     right = max(0, int(obj.right_blocking_radius))
     if left == 0 and right == 0:
         return (origin,)
-    vertical = max(left, right)
     tiles: list[Tile] = []
     for dx in range(-left, right + 1):
-        for dy in range(-vertical, vertical + 1):
-            tiles.append(Tile(origin.x + dx, origin.y + dy))
+        tiles.append(Tile(origin.x + dx, origin.y))
     return tuple(tiles)
 
 
@@ -157,7 +154,7 @@ def next_walkable_step(
             return None
         effective_target = resolved
 
-    preferred = step_toward(start, effective_target)
+    preferred = _diagonal_step_toward(start, effective_target)
     if (
         preferred != start
         and can_step_to(
@@ -204,3 +201,130 @@ def next_walkable_step(
     if parent.get(step) != start:
         return None
     return step
+
+
+def walkable_path(
+    start: Tile,
+    target: Tile,
+    tile_objects: dict[Tile, int],
+    objects: dict[int, OholObject],
+    *,
+    max_search: int = 48,
+    max_steps: int = 6,
+    blocked_tiles: set[Tile] | None = None,
+) -> tuple[Tile, ...] | None:
+    """Return a short walkable path from start toward target."""
+    if max_steps <= 0:
+        return ()
+    if start == target:
+        return ()
+    effective_target = target
+    if not is_walkable(
+        target, tile_objects, objects, blocked_tiles=blocked_tiles
+    ):
+        resolved = resolve_approach_tile(
+            target,
+            start,
+            tile_objects,
+            objects,
+            blocked_tiles=blocked_tiles,
+        )
+        if resolved is None:
+            return None
+        effective_target = resolved
+
+    preferred = _straight_path_prefix(
+        start,
+        effective_target,
+        tile_objects,
+        objects,
+        max_steps=max_steps,
+        blocked_tiles=blocked_tiles,
+    )
+    if preferred:
+        return preferred
+
+    blocked = blocked_tiles or set()
+    parent: dict[Tile, Tile | None] = {start: None}
+    queue: deque[Tile] = deque([start])
+    found = False
+    while queue:
+        current = queue.popleft()
+        if current.distance_to(start) > max_search:
+            continue
+        if current == effective_target:
+            found = True
+            break
+        for neighbor in _neighbors(current):
+            if neighbor in parent:
+                continue
+            if not can_step_to(
+                current,
+                neighbor,
+                tile_objects,
+                objects,
+                blocked_tiles=blocked,
+            ):
+                continue
+            parent[neighbor] = current
+            queue.append(neighbor)
+
+    if not found:
+        return None
+
+    path: list[Tile] = []
+    step = effective_target
+    while parent[step] is not None:
+        path.append(step)
+        step = parent[step]
+    path.reverse()
+    return tuple(path[:max_steps])
+
+
+def _straight_path_prefix(
+    start: Tile,
+    target: Tile,
+    tile_objects: dict[Tile, int],
+    objects: dict[int, OholObject],
+    *,
+    max_steps: int,
+    blocked_tiles: set[Tile] | None = None,
+) -> tuple[Tile, ...]:
+    current = start
+    path: list[Tile] = []
+    for _ in range(max_steps):
+        step = _diagonal_step_toward(current, target)
+        if step == current:
+            break
+        if not can_step_to(
+            current,
+            step,
+            tile_objects,
+            objects,
+            blocked_tiles=blocked_tiles,
+        ):
+            break
+        path.append(step)
+        current = step
+        if current == target:
+            break
+    return tuple(path)
+
+
+def _diagonal_step_toward(start: Tile, target: Tile) -> Tile:
+    if start == target:
+        return start
+    dx = target.x - start.x
+    dy = target.y - start.y
+    return Tile(
+        start.x + _sign(dx),
+        start.y + _sign(dy),
+    )
+
+
+def _sign(value: int) -> int:
+    if value > 0:
+        return 1
+    if value < 0:
+        return -1
+    return 0

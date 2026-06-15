@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import time
+from pathlib import Path
 from hmac import new as hmac_new
 from hashlib import sha1
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ from dataclasses import dataclass
 from .client import BotClient
 from .game_data import OholGameData, load_game_data
 from .model import Action, ActionType, Observation, PlayerState, Tile, step_toward
-from .movement import next_walkable_step
+from .movement import walkable_path
 from .protocol_messages import (
     CompressedMessage,
     CravingMessage,
@@ -27,6 +28,9 @@ from .protocol_messages import (
 )
 from .protocol_framing import ProtocolFrameReader
 from .world_state import WorldState
+
+_SERVER_LOG_SAY_MARKER = "Got client message from "
+MAX_MOVE_BATCH_STEPS = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +178,14 @@ class OholProtocolClient(OholProtocolProbe):
         super().__init__(host, port, credentials, timeout_seconds)
         self.keep_alive_interval_seconds = keep_alive_interval_seconds
         self.game_data = game_data
+        self._server_log_path = (
+            Path(game_data_root) / "log.txt" if game_data_root is not None else None
+        )
+        self._server_log_offset = (
+            self._server_log_path.stat().st_size
+            if self._server_log_path is not None and self._server_log_path.exists()
+            else 0
+        )
         if self.game_data is None and game_data_root is not None:
             self.game_data = load_game_data(game_data_root)
         self.world_state = WorldState()
@@ -212,6 +224,7 @@ class OholProtocolClient(OholProtocolProbe):
             raise RuntimeError("Server rejected login")
         if not self.logged_in:
             raise RuntimeError("Timed out waiting for ACCEPTED after LOGIN")
+        self._poll_server_log_events()
 
         # Drain the initial spawn burst so player id/tile are available quickly.
         burst_deadline = time.monotonic() + 3.0
@@ -354,20 +367,20 @@ class OholProtocolClient(OholProtocolProbe):
                 self._awaiting_move_self_confirm = True
             target = Tile(action.payload["x"], action.payload["y"])
             self.world_state.last_move_target = target
-            if self.game_data is not None:
-                start = self._action_tile
-                step = self._resolve_move_step(start, target)
-                if step is None or (step == start and start != target):
-                    self.world_state.note_move_blocked(target)
-                    self.world_state.last_move_target = target
-                    return
-                action = Action(
-                    ActionType.MOVE_TO,
-                    {
-                        **action.payload,
-                        "sequence": self.move_sequence + 1,
-                    },
-                )
+            start = self._action_tile
+            path = self._resolve_move_path(start, target)
+            if not path and start != target:
+                self.world_state.note_move_blocked(target)
+                self.world_state.last_move_target = target
+                return
+            action = Action(
+                ActionType.MOVE_TO,
+                {
+                    **action.payload,
+                    "sequence": self.move_sequence + 1,
+                    "path": path,
+                },
+            )
         if self._last_observation is not None:
             self.world_state.note_outgoing_action(
                 action, self._last_observation, self.game_data
@@ -377,6 +390,7 @@ class OholProtocolClient(OholProtocolProbe):
 
     def observe(self) -> Observation:
         self._poll_once()
+        self._poll_server_log_events()
         self._maybe_send_keep_alive()
         if self.self_player_id is not None:
             self.world_state.self_player_id = self.self_player_id
@@ -386,9 +400,10 @@ class OholProtocolClient(OholProtocolProbe):
         self._last_observation = observation
         return observation
 
-    def _resolve_move_step(self, start: Tile, target: Tile) -> Tile | None:
+    def _resolve_move_path(self, start: Tile, target: Tile) -> tuple[Tile, ...]:
         if self.game_data is None:
-            return step_toward(start, target)
+            step = step_toward(start, target)
+            return () if step == start else (step,)
         start_abs = self.world_state.to_absolute(start)
         target_abs = self.world_state.to_absolute(target)
         blocked_abs = {
@@ -405,24 +420,31 @@ class OholProtocolClient(OholProtocolProbe):
             blocked_tiles=blocked_abs,
         )
         if destination_abs is None:
-            return None
-        step_abs = next_walkable_step(
+            return ()
+        path_abs = walkable_path(
             start_abs,
             destination_abs,
             self.world_state.tile_objects,
             self.game_data.objects,
+            max_steps=MAX_MOVE_BATCH_STEPS,
             blocked_tiles=blocked_abs,
         )
-        if step_abs is None:
-            return None
-        return self.world_state.to_relative(step_abs)
+        if not path_abs:
+            return ()
+        return tuple(self.world_state.to_relative(tile) for tile in path_abs)
 
     def _maybe_lock_self_player_id(self, player_id: int) -> None:
         if self._self_player_id_locked:
             return
+        self._set_self_player_id(player_id)
+
+    def _set_self_player_id(self, player_id: int) -> None:
         self.self_player_id = player_id
         self.world_state.self_player_id = player_id
         self._self_player_id_locked = True
+        player = self.world_state.players.get(player_id)
+        if player is not None:
+            self._sync_self_tile(player.tile)
 
     def _sync_self_tile(self, tile: Tile) -> None:
         self.current_tile = tile
@@ -451,6 +473,8 @@ class OholProtocolClient(OholProtocolProbe):
         elif isinstance(message, LineageMessage):
             pass
         elif isinstance(message, (PlayerUpdateMessage, PlayerMovementMessage, PlayerSaysMessage, FoodChangeMessage, CravingMessage, MapChangeMessage, MapChunkMessage)):
+            if isinstance(message, PlayerUpdateMessage):
+                self._maybe_lock_self_from_player_update(message)
             self.world_state.apply(message)
             if isinstance(message, PlayerUpdateMessage):
                 self._sync_self_from_player_updates(message)
@@ -462,13 +486,18 @@ class OholProtocolClient(OholProtocolProbe):
                 self._dispatch_message(nested)
 
     def _sync_self_from_player_updates(self, message: PlayerUpdateMessage) -> None:
-        if not self._self_player_id_locked and len(message.players) == 1:
-            self._maybe_lock_self_player_id(message.players[0].player_id)
+        self._maybe_lock_self_from_player_update(message)
 
         for entry in message.players:
             if entry.player_id == self.self_player_id:
                 if entry.x is not None and entry.y is not None:
                     self._sync_self_tile(Tile(entry.x, entry.y))
+
+    def _maybe_lock_self_from_player_update(self, message: PlayerUpdateMessage) -> None:
+        if self._server_log_path is not None:
+            return
+        if not self._self_player_id_locked and len(message.players) == 1:
+            self._maybe_lock_self_player_id(message.players[0].player_id)
 
     def _sync_self_from_movement(self, message: PlayerMovementMessage) -> None:
         for entry in message.players:
@@ -500,6 +529,33 @@ class OholProtocolClient(OholProtocolProbe):
         self._sent_keep_alives += 1
         self._last_keep_alive_at = now
 
+    def _poll_server_log_events(self) -> None:
+        if self._server_log_path is None or not self._server_log_path.exists():
+            return
+        try:
+            size = self._server_log_path.stat().st_size
+            if size < self._server_log_offset:
+                self._server_log_offset = 0
+            if size == self._server_log_offset:
+                return
+            with self._server_log_path.open("rb") as handle:
+                handle.seek(self._server_log_offset)
+                chunk = handle.read()
+            self._server_log_offset = size
+        except OSError:
+            return
+        text = chunk.decode("utf-8", errors="replace")
+        for line in text.splitlines():
+            self_player_id = _self_player_id_from_server_log_line(
+                line,
+                account=self.credentials.email,
+            )
+            if self_player_id is not None:
+                self._set_self_player_id(self_player_id)
+            event = _player_says_from_server_log_line(line)
+            if event is not None:
+                self.world_state.apply(event)
+
 
 def _batch_has_frame(messages: tuple[ProtocolMessage, ...]) -> bool:
     for message in messages:
@@ -508,6 +564,60 @@ def _batch_has_frame(messages: tuple[ProtocolMessage, ...]) -> bool:
         if isinstance(message, CompressedMessage) and _batch_has_frame(message.decompressed):
             return True
     return False
+
+
+def _player_says_from_server_log_line(line: str) -> PlayerSaysMessage | None:
+    marker_index = line.find(_SERVER_LOG_SAY_MARKER)
+    if marker_index < 0:
+        return None
+    payload = line[marker_index + len(_SERVER_LOG_SAY_MARKER):]
+    player_raw, separator, message = payload.partition(": SAY ")
+    if not separator:
+        return None
+    try:
+        player_id = int(player_raw.strip())
+    except ValueError:
+        return None
+    fields = message.strip().split()
+    if len(fields) >= 3:
+        text = " ".join(fields[2:]).strip()
+    else:
+        text = message.strip()
+    if not text:
+        return None
+    return PlayerSaysMessage(
+        ProtocolMessageType.PLAYER_SAYS,
+        line,
+        player_id=player_id,
+        text=text,
+        raw_fields=tuple(fields),
+    )
+
+
+def _self_player_id_from_server_log_line(line: str, *, account: str) -> int | None:
+    connected_marker = f"New player {account} connected as player "
+    connected_index = line.find(connected_marker)
+    if connected_index >= 0:
+        rest = line[connected_index + len(connected_marker):]
+        raw_player_id = rest.split(maxsplit=1)[0]
+        try:
+            return int(raw_player_id)
+        except ValueError:
+            return None
+
+    reconnect_marker = f"({account}) has reconnected"
+    reconnect_index = line.find(reconnect_marker)
+    if reconnect_index < 0:
+        return None
+    player_prefix = "Player "
+    player_index = line.rfind(player_prefix, 0, reconnect_index)
+    if player_index < 0:
+        return None
+    raw_player_id = line[player_index + len(player_prefix):].split(maxsplit=1)[0]
+    try:
+        return int(raw_player_id)
+    except ValueError:
+        return None
 
 
 def build_login_message(credentials: ProtocolCredentials, challenge: str | None = None) -> str:
@@ -540,9 +650,9 @@ def _resolve_move_step(
     client: OholProtocolProbe | None,
 ) -> Tile:
     if client is not None and isinstance(client, OholProtocolClient):
-        step = client._resolve_move_step(start, target)
-        if step is not None:
-            return step
+        path = client._resolve_move_path(start, target)
+        if path:
+            return path[0]
     return step_toward(start, target)
 
 
@@ -555,15 +665,19 @@ def serialize_action(action: Action, client: OholProtocolProbe | None = None) ->
             action.payload.get("start_y", 0),
         )
         target = Tile(action.payload["x"], action.payload["y"])
-        step = _resolve_move_step(start, target, client)
+        path = _action_path(action, start, target, client)
         sequence = action.payload.get("sequence")
         if sequence is None:
             sequence = (client.move_sequence + 1) if client is not None else 1
-        dx = step.x - start.x
-        dy = step.y - start.y
         if client is not None:
             client.move_sequence = int(sequence)
-        return f"MOVE {start.x} {start.y} @{sequence} {dx} {dy}#"
+        offsets: list[str] = []
+        for step in path:
+            offsets.append(str(step.x - start.x))
+            offsets.append(str(step.y - start.y))
+        if not offsets:
+            offsets = ["0", "0"]
+        return f"MOVE {start.x} {start.y} @{sequence} {' '.join(offsets)}#"
     if action.type is ActionType.FORCE:
         return f"FORCE {action.payload['x']} {action.payload['y']}#"
     if action.type is ActionType.PICK_UP:
@@ -582,3 +696,17 @@ def serialize_action(action: Action, client: OholProtocolProbe | None = None) ->
     if action.type is ActionType.WAIT:
         return f"WAIT {action.payload.get('ticks', 1)}#"
     raise ValueError(f"Unsupported action type: {action.type}")
+
+
+def _action_path(
+    action: Action,
+    start: Tile,
+    target: Tile,
+    client: OholProtocolProbe | None,
+) -> tuple[Tile, ...]:
+    raw_path = action.payload.get("path")
+    if isinstance(raw_path, tuple) and raw_path:
+        path = tuple(tile for tile in raw_path if isinstance(tile, Tile))
+        if path:
+            return path
+    return (_resolve_move_step(start, target, client),)

@@ -16,6 +16,7 @@ class ActionFeedbackState:
     last_outgoing_move_seq: int = 0
     confirmed_move_seq: int = 0
     pending_move_step: Tile | None = None
+    pending_move_path: tuple[Tile, ...] = ()
     blocked_tiles: set[Tile] = field(default_factory=set)
     avoid_targets: set[Tile] = field(default_factory=set)
     blocked_target_attempts: dict[Tile, int] = field(default_factory=dict)
@@ -25,18 +26,26 @@ class ActionFeedbackState:
     def eat_pending_facts_value(self) -> bool:
         return self.eat_pending
 
-    def note_move_sent(self, step: Tile, target: Tile, sequence: int) -> None:
+    def note_move_sent(
+        self,
+        step: Tile,
+        target: Tile,
+        sequence: int,
+        path: tuple[Tile, ...] = (),
+    ) -> None:
         self.last_outgoing_move_seq = sequence
         self.pending_move_step = step
+        self.pending_move_path = path or (step,)
         self.last_move_target = target
 
     def note_force_truncation(self) -> None:
-        if self.pending_move_step is not None:
-            self.blocked_tiles.add(self.pending_move_step)
+        for tile in self.pending_move_path:
+            self.blocked_tiles.add(tile)
         if self.last_move_target is not None:
             self.blocked_tiles.add(self.last_move_target)
             self.avoid_targets.add(self.last_move_target)
         self.pending_move_step = None
+        self.pending_move_path = ()
         self.last_outgoing_move_seq = 0
 
     def note_move_blocked(self, target: Tile) -> None:
@@ -49,6 +58,7 @@ class ActionFeedbackState:
         if self.pending_move_step is not None:
             self.blocked_tiles.add(self.pending_move_step)
         self.pending_move_step = None
+        self.pending_move_path = ()
         self.last_outgoing_move_seq = 0
 
     def move_in_flight(self) -> bool:
@@ -86,6 +96,7 @@ class ActionFeedbackState:
         self.confirmed_move_seq = done_moving_seq
         if done_moving_seq == self.last_outgoing_move_seq:
             self.pending_move_step = None
+            self.pending_move_path = ()
             return True
         return False
 

@@ -5,6 +5,7 @@ from ohol_bot.movement import (
     is_walkable,
     next_walkable_step,
     tile_blocks_walking,
+    walkable_path,
 )
 
 
@@ -43,6 +44,15 @@ def test_tile_blocks_walking_from_neighbor_wide_collision() -> None:
     objects = {64: _wide_tree()}
 
     assert tile_blocks_walking(blocked_neighbor, tile_objects, objects) is True
+
+
+def test_wide_collision_does_not_block_vertical_neighbors() -> None:
+    tree_tile = Tile(5, 5)
+    vertical_neighbor = Tile(5, 6)
+    tile_objects = {tree_tile: 64}
+    objects = {64: _wide_tree()}
+
+    assert tile_blocks_walking(vertical_neighbor, tile_objects, objects) is False
 
 
 def test_blocking_footprint_uses_left_right_asymmetry() -> None:
@@ -85,6 +95,37 @@ def test_next_walkable_step_routes_around_tree() -> None:
 
     assert step is not None
     assert step not in {Tile(1, 0), Tile(2, 0)}
+
+
+def test_walkable_path_returns_short_batched_path() -> None:
+    start = Tile(0, 0)
+    target = Tile(10, 0)
+
+    path = walkable_path(start, target, {}, {}, max_steps=4)
+
+    assert path == (Tile(1, 0), Tile(2, 0), Tile(3, 0), Tile(4, 0))
+
+
+def test_walkable_path_uses_diagonal_steps_when_clear() -> None:
+    start = Tile(0, 0)
+    target = Tile(4, 4)
+
+    path = walkable_path(start, target, {}, {}, max_steps=4)
+
+    assert path == (Tile(1, 1), Tile(2, 2), Tile(3, 3), Tile(4, 4))
+
+
+def test_walkable_path_routes_around_tree() -> None:
+    start = Tile(0, 0)
+    target = Tile(3, 0)
+    tile_objects = {Tile(1, 0): 63}
+    objects = {63: _tree()}
+
+    path = walkable_path(start, target, tile_objects, objects, max_steps=4)
+
+    assert path is not None
+    assert Tile(1, 0) not in path
+    assert path[0] != start
 
 
 def test_next_walkable_step_returns_none_when_unreachable() -> None:
@@ -161,6 +202,70 @@ def test_serialize_move_avoids_tree_with_game_data() -> None:
 
     assert message.startswith("MOVE 0 0 @1 ")
     assert message != "MOVE 0 0 @1 1 0#"
+
+
+def test_send_uses_batched_move_when_path_is_clear() -> None:
+    from ohol_bot.game_data import OholGameData
+    from ohol_bot.model import Action, ActionType, Observation, PlayerState
+    from ohol_bot.protocol_client import OholProtocolClient
+
+    client = OholProtocolClient(
+        game_data=OholGameData(
+            objects={},
+            transitions=(),
+            biomes=__import__("ohol_bot.biomes", fromlist=["BiomeCatalog"]).BiomeCatalog({}),
+        )
+    )
+    client._self_player_id_locked = True
+    client._action_tile = Tile(0, 0)
+    client._last_observation = Observation(
+        tick=0,
+        self=PlayerState(
+            player_id=1,
+            tile=Tile(0, 0),
+            age=18,
+            food_store=10,
+            max_food_store=20,
+            is_stationary=True,
+        ),
+    )
+    client.socket = type("Sock", (), {"sendall": lambda self, data: None})()
+
+    client.send(Action(ActionType.MOVE_TO, {"x": 6, "y": 0}))
+
+    assert client.sent_messages == ["MOVE 0 0 @1 1 0 2 0 3 0 4 0 5 0 6 0#"]
+
+
+def test_send_uses_batched_diagonal_move_when_path_is_clear() -> None:
+    from ohol_bot.game_data import OholGameData
+    from ohol_bot.model import Action, ActionType, Observation, PlayerState
+    from ohol_bot.protocol_client import OholProtocolClient
+
+    client = OholProtocolClient(
+        game_data=OholGameData(
+            objects={},
+            transitions=(),
+            biomes=__import__("ohol_bot.biomes", fromlist=["BiomeCatalog"]).BiomeCatalog({}),
+        )
+    )
+    client._self_player_id_locked = True
+    client._action_tile = Tile(0, 0)
+    client._last_observation = Observation(
+        tick=0,
+        self=PlayerState(
+            player_id=1,
+            tile=Tile(0, 0),
+            age=18,
+            food_store=10,
+            max_food_store=20,
+            is_stationary=True,
+        ),
+    )
+    client.socket = type("Sock", (), {"sendall": lambda self, data: None})()
+
+    client.send(Action(ActionType.MOVE_TO, {"x": 4, "y": 4}))
+
+    assert client.sent_messages == ["MOVE 0 0 @1 1 1 2 2 3 3 4 4#"]
 
 
 def test_send_skips_move_when_blocked() -> None:

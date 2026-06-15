@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 from .biomes import count_biomes_in_radius
 from .game_data import OholGameData
 from .model import Action, ActionType, ObjectState, Observation, PlayerState, Tile, step_toward
-from .movement import next_walkable_step
+from .movement import next_walkable_step, walkable_path
 from .spatial_memory import SpatialMemory, WORKING_RADIUS, remembered_target_fact
 from .world_feedback import ActionFeedbackState
 from .protocol_messages import (
@@ -99,8 +99,14 @@ class WorldState:
             return
         self.birth_tile = Tile(absolute.x - relative.x, absolute.y - relative.y)
 
-    def note_move_sent(self, step: Tile, target: Tile, sequence: int) -> None:
-        self.feedback.note_move_sent(step, target, sequence)
+    def note_move_sent(
+        self,
+        step: Tile,
+        target: Tile,
+        sequence: int,
+        path: tuple[Tile, ...] = (),
+    ) -> None:
+        self.feedback.note_move_sent(step, target, sequence, path)
         self._unchanged_move_ticks = 0
         self._mark_self_moving()
 
@@ -125,30 +131,37 @@ class WorldState:
         if action.type is ActionType.MOVE_TO:
             target = Tile(action.payload["x"], action.payload["y"])
             start = observation.self.tile
+            payload_path = _payload_path(action.payload.get("path"))
             if game_data is not None:
-                start_abs = self.to_absolute(start)
-                target_abs = self.to_absolute(target)
-                blocked_abs = {
-                    self.to_absolute(tile) for tile in self.blocked_tiles
-                }
-                next_abs = next_walkable_step(
-                    start_abs,
-                    target_abs,
-                    self.tile_objects,
-                    game_data.objects,
-                    blocked_tiles=blocked_abs,
-                )
-                if next_abs is None:
-                    self.note_move_blocked(target)
-                    return
-                next_tile = self.to_relative(next_abs)
+                if payload_path:
+                    path = payload_path
+                    next_tile = path[0]
+                else:
+                    start_abs = self.to_absolute(start)
+                    target_abs = self.to_absolute(target)
+                    blocked_abs = {
+                        self.to_absolute(tile) for tile in self.blocked_tiles
+                    }
+                    path_abs = walkable_path(
+                        start_abs,
+                        target_abs,
+                        self.tile_objects,
+                        game_data.objects,
+                        blocked_tiles=blocked_abs,
+                    )
+                    if not path_abs:
+                        self.note_move_blocked(target)
+                        return
+                    path = tuple(self.to_relative(tile) for tile in path_abs)
+                    next_tile = path[0]
             else:
                 next_tile = step_toward(start, target)
+                path = (next_tile,) if next_tile != start else ()
             if next_tile != start:
                 sequence = action.payload.get(
                     "sequence", self.feedback.last_outgoing_move_seq + 1
                 )
-                self.note_move_sent(next_tile, target, sequence)
+                self.note_move_sent(next_tile, target, sequence, path)
             return
 
         if action.type is ActionType.PICK_UP:
@@ -324,7 +337,7 @@ class WorldState:
             player
             for player_id, player in self.players.items()
             if player_id != self.self_player_id
-            and self_player.tile.distance_to(player.tile) <= radius
+            and _chebyshev(self_player.tile, player.tile) <= radius
         )
         self_biome_id = self.tile_biomes.get(self.to_absolute(self_player.tile))
         self_floor_id = self.tile_floors.get(self.to_absolute(self_player.tile))
@@ -753,3 +766,19 @@ def _object_at(observation: Observation, tile: Tile) -> ObjectState | None:
         if obj.tile == tile:
             return obj
     return None
+
+
+def _payload_path(raw) -> tuple[Tile, ...]:
+    if not isinstance(raw, tuple):
+        return ()
+    path: list[Tile] = []
+    for item in raw:
+        if isinstance(item, Tile):
+            path.append(item)
+        elif isinstance(item, dict) and "x" in item and "y" in item:
+            path.append(Tile(int(item["x"]), int(item["y"])))
+    return tuple(path)
+
+
+def _chebyshev(a: Tile, b: Tile) -> int:
+    return max(abs(a.x - b.x), abs(a.y - b.y))

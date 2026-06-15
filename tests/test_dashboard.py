@@ -12,13 +12,13 @@ def test_explain_move_action_uses_follow_reason() -> None:
             food_store=3,
             max_food_store=15,
         ),
-        facts={"follow_reason": "move toward follow band"},
+        facts={"follow_reason": "move adjacent to leader"},
     )
     action = Action(ActionType.MOVE_TO, {"x": 1, "y": 0})
 
     reason = explain_action(observation, action)
 
-    assert "move toward follow band" in reason
+    assert "move adjacent to leader" in reason
     assert "(1, 0)" in reason
 
 
@@ -60,7 +60,10 @@ def test_format_dashboard_includes_movement_follow_telemetry() -> None:
             "follow_leader_tile": {"x": 4, "y": -1},
             "follow_leader_distance": 2,
             "follow_target": {"x": 3, "y": -1},
-            "follow_reason": "move toward follow band",
+            "follow_reason": "move adjacent to leader",
+            "chat_events": (
+                {"sequence": 1, "player_id": 8, "text": "FOLLOW"},
+            ),
         },
     )
 
@@ -72,10 +75,13 @@ def test_format_dashboard_includes_movement_follow_telemetry() -> None:
         mode="run-live",
     )
 
-    assert "Movement mode: follow" in frame.text
-    assert "Leader id: 8" in frame.text
-    assert "Follow target: (3, -1)" in frame.text
+    assert "Actions" in frame.text
+    assert "Goal: follow target (3, -1), leader 8 at (4, -1), dist=2" in frame.text
+    assert "Last chat: player 8: FOLLOW" in frame.text
+    assert "Status:" in frame.text
+    assert "Action blocked by: nothing" in frame.text
     assert "player 8" in frame.text
+    assert "Other players nearby" not in frame.text
     assert "effective" not in frame.text
     assert "empty)" not in frame.text
     assert "Planner hungry" not in frame.text
@@ -87,6 +93,9 @@ def test_format_dashboard_includes_movement_follow_telemetry() -> None:
     assert "Tracked tiles: 42" in frame.text
     assert "planner tick 2" in frame.text
     assert "protocol msgs 3" in frame.text
+    assert "KA pings 0" in frame.text
+    assert "Actions sent: 0" in frame.text
+    assert "Connection" not in frame.text
 
 
 def test_format_dashboard_shows_idle_movement_mode() -> None:
@@ -106,7 +115,9 @@ def test_format_dashboard_shows_idle_movement_mode() -> None:
 
     frame = format_dashboard(client, observation, tick=1)
 
-    assert "Movement mode: idle" in frame.text
+    assert "Goal: none" in frame.text
+    assert "Can move/self-act:" in frame.text
+    assert "Stationary:" in frame.text
     assert "Holding:" in frame.text
     assert "Carried by:" in frame.text
     assert "Next Yum" not in frame.text

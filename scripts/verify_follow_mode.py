@@ -61,15 +61,15 @@ def main() -> int:
     finally:
         client.close()
 
-    close_ticks = sum(1 for distance in distances if 1 <= distance <= 3)
-    ok = leader_seen_ticks > 0 and close_ticks >= max(1, leader_seen_ticks // 2)
+    adjacent_ticks = sum(1 for distance in distances if distance <= 1)
+    ok = leader_seen_ticks > 0 and adjacent_ticks >= max(1, leader_seen_ticks // 2)
     report = {
         "ok": ok,
         "leader_id": leader_id,
         "ticks": len(positions),
         "elapsed_seconds": round(time.monotonic() - start, 2),
         "leader_seen_ticks": leader_seen_ticks,
-        "close_follow_ticks": close_ticks,
+        "adjacent_follow_ticks": adjacent_ticks,
         "move_actions": move_actions,
         "unique_positions": len(set(positions)),
         "final_tile": (

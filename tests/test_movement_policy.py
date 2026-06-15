@@ -13,6 +13,10 @@ def _player(player_id: int, x: int, y: int) -> PlayerState:
     )
 
 
+def _chebyshev(a: Tile, b: Tile) -> int:
+    return max(abs(a.x - b.x), abs(a.y - b.y))
+
+
 def test_movement_policy_defaults_to_idle_wait() -> None:
     policy = MovementFollowPolicy()
     observation = Observation(tick=1, self=_player(5, 0, 0))
@@ -41,7 +45,7 @@ def test_movement_policy_enters_follow_from_chat_command() -> None:
     assert observation.facts["follow_target"] is not None
 
 
-def test_movement_policy_waits_inside_follow_distance_band() -> None:
+def test_movement_policy_waits_when_same_tile_as_leader() -> None:
     policy = MovementFollowPolicy()
     policy.decide(
         Observation(
@@ -54,14 +58,80 @@ def test_movement_policy_waits_inside_follow_distance_band() -> None:
     observation = Observation(
         tick=2,
         self=_player(5, 0, 0),
-        nearby_players=(_player(8, 2, 0),),
+        nearby_players=(_player(8, 0, 0),),
         facts={"chat_events": ({"sequence": 1, "player_id": 8, "text": "follow"},)},
     )
 
     action = policy.decide(observation)
 
     assert action.type is ActionType.WAIT
-    assert observation.facts["follow_reason"] == "inside follow distance band"
+    assert observation.facts["follow_reason"] == "close enough to leader"
+    assert observation.facts["follow_target"] is None
+
+
+def test_movement_policy_waits_when_adjacent_to_leader() -> None:
+    policy = MovementFollowPolicy()
+    policy.decide(
+        Observation(
+            tick=1,
+            self=_player(5, 0, 0),
+            nearby_players=(_player(8, 6, 0),),
+            facts={"chat_events": ({"sequence": 1, "player_id": 8, "text": "follow"},)},
+        )
+    )
+    observation = Observation(
+        tick=2,
+        self=_player(5, 0, 0),
+        nearby_players=(_player(8, 1, 0),),
+        facts={"chat_events": ({"sequence": 1, "player_id": 8, "text": "follow"},)},
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.WAIT
+    assert observation.facts["follow_reason"] == "close enough to leader"
+
+
+def test_movement_policy_moves_to_adjacent_tile_when_leader_two_tiles_away() -> None:
+    policy = MovementFollowPolicy()
+    observation = Observation(
+        tick=1,
+        self=_player(5, 0, 0),
+        nearby_players=(_player(8, 2, 0),),
+        facts={"chat_events": ({"sequence": 1, "player_id": 8, "text": "follow"},)},
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.MOVE_TO
+    assert _chebyshev(Tile(action.payload["x"], action.payload["y"]), Tile(2, 0)) == 1
+
+
+def test_movement_policy_treats_avoid_targets_as_soft_penalty() -> None:
+    policy = MovementFollowPolicy()
+    observation = Observation(
+        tick=1,
+        self=_player(5, 0, 0),
+        nearby_players=(_player(8, 2, 0),),
+        facts={
+            "chat_events": ({"sequence": 1, "player_id": 8, "text": "follow"},),
+            "avoid_targets": ((1, 0),),
+            "blocked_tiles": (
+                (1, -1),
+                (1, 1),
+                (2, -1),
+                (2, 1),
+                (3, -1),
+                (3, 0),
+                (3, 1),
+            ),
+        },
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.MOVE_TO
+    assert Tile(action.payload["x"], action.payload["y"]) == Tile(1, 0)
 
 
 def test_movement_policy_stop_follow_returns_to_idle() -> None:
@@ -107,7 +177,7 @@ def test_movement_policy_reuses_recent_follow_target() -> None:
     second = Observation(
         tick=2,
         self=_player(5, 0, 0),
-        nearby_players=(_player(8, 8, 1),),
+        nearby_players=(_player(8, 8, 0),),
         facts={"chat_events": ({"sequence": 1, "player_id": 8, "text": "follow"},)},
     )
     second_action = policy.decide(second)

@@ -9,9 +9,7 @@ from .policy import Policy
 
 @dataclass(frozen=True, slots=True)
 class FollowConfig:
-    min_distance: int = 1
-    desired_distance: int = 2
-    max_distance: int = 3
+    desired_distance: int = 1
     retarget_cooldown_ticks: int = 4
 
 
@@ -47,22 +45,23 @@ class MovementFollowPolicy(Policy):
 
         distance = _chebyshev(observation.self.tile, leader.tile)
         self._last_leader_tile = leader.tile
-        if self.config.min_distance <= distance <= self.config.max_distance:
+        if distance <= self.config.desired_distance:
+            self._current_target = None
             self._annotate(
                 observation,
                 leader=leader,
                 leader_distance=distance,
-                reason="inside follow distance band",
+                reason="close enough to leader",
             )
             return Action(ActionType.WAIT, {"ticks": 1})
 
-        target = self._select_follow_target(observation, leader, distance)
+        target = self._select_follow_target(observation, leader)
         self._annotate(
             observation,
             leader=leader,
             leader_distance=distance,
             target=target,
-            reason=command_reason or "move toward follow band",
+            reason=command_reason or "move adjacent to leader",
         )
         if target == observation.self.tile:
             return Action(ActionType.WAIT, {"ticks": 1})
@@ -104,10 +103,9 @@ class MovementFollowPolicy(Policy):
         self,
         observation: Observation,
         leader: PlayerState,
-        leader_distance: int,
     ) -> Tile:
         blocked = _tile_set(observation.facts.get("blocked_tiles"))
-        blocked |= _tile_set(observation.facts.get("avoid_targets"))
+        avoid_targets = _tile_set(observation.facts.get("avoid_targets"))
         now_tick = observation.tick
         if (
             self._current_target is not None
@@ -117,26 +115,16 @@ class MovementFollowPolicy(Policy):
             return self._current_target
 
         candidates = self._candidate_tiles(leader, blocked)
-        if leader_distance < self.config.min_distance:
-            candidates.sort(
-                key=lambda tile: (
-                    -_chebyshev(tile, leader.tile),
-                    _chebyshev(tile, observation.self.tile),
-                    tile.x,
-                    tile.y,
-                )
+        candidates.sort(
+            key=lambda tile: (
+                1 if tile in avoid_targets else 0,
+                _chebyshev(tile, observation.self.tile),
+                0 if tile == self._current_target else 1,
+                tile.x,
+                tile.y,
             )
-        else:
-            candidates.sort(
-                key=lambda tile: (
-                    abs(_chebyshev(tile, leader.tile) - self.config.desired_distance),
-                    _chebyshev(tile, observation.self.tile),
-                    0 if tile == self._current_target else 1,
-                    tile.x,
-                    tile.y,
-                )
-            )
-        target = candidates[0] if candidates else leader.tile
+        )
+        target = candidates[0] if candidates else observation.self.tile
         self._current_target = target
         self._target_set_tick = now_tick
         return target
@@ -147,21 +135,15 @@ class MovementFollowPolicy(Policy):
         blocked: set[Tile],
     ) -> list[Tile]:
         candidates: list[Tile] = []
-        radii = (
-            self.config.desired_distance,
-            self.config.max_distance,
-            self.config.min_distance,
-            self.config.max_distance + 1,
-        )
-        for radius in radii:
-            for dx in range(-radius, radius + 1):
-                for dy in range(-radius, radius + 1):
-                    if max(abs(dx), abs(dy)) != radius:
-                        continue
-                    tile = Tile(leader.tile.x + dx, leader.tile.y + dy)
-                    if tile == leader.tile or tile in blocked:
-                        continue
-                    candidates.append(tile)
+        radius = self.config.desired_distance
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if max(abs(dx), abs(dy)) != radius:
+                    continue
+                tile = Tile(leader.tile.x + dx, leader.tile.y + dy)
+                if tile == leader.tile or tile in blocked:
+                    continue
+                candidates.append(tile)
         return candidates
 
     def _target_is_still_reasonable(
@@ -173,7 +155,7 @@ class MovementFollowPolicy(Policy):
         if target in blocked:
             return False
         distance = _chebyshev(target, leader.tile)
-        return self.config.min_distance <= distance <= self.config.max_distance + 1
+        return distance == self.config.desired_distance
 
     def _annotate(
         self,
