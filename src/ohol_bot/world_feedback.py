@@ -18,7 +18,6 @@ class ActionFeedbackState:
     pending_move_step: Tile | None = None
     pending_move_path: tuple[Tile, ...] = ()
     blocked_tiles: set[Tile] = field(default_factory=set)
-    avoid_targets: set[Tile] = field(default_factory=set)
     blocked_target_attempts: dict[Tile, int] = field(default_factory=dict)
     last_move_target: Tile | None = None
     last_move_path: tuple[Tile, ...] = ()
@@ -49,7 +48,6 @@ class ActionFeedbackState:
             self.blocked_tiles.add(tile)
         if self.last_move_target is not None:
             self.blocked_tiles.add(self.last_move_target)
-            self.avoid_targets.add(self.last_move_target)
         self.pending_move_step = None
         self.pending_move_path = ()
         self.last_outgoing_move_seq = 0
@@ -58,7 +56,7 @@ class ActionFeedbackState:
         attempts = self.blocked_target_attempts.get(target, 0) + 1
         self.blocked_target_attempts[target] = attempts
         if attempts >= 2:
-            self.avoid_targets.add(target)
+            self.blocked_tiles.add(target)
 
     def note_move_step_failed(self) -> None:
         if self.pending_move_step is not None:
@@ -103,6 +101,7 @@ class ActionFeedbackState:
         if done_moving_seq == self.last_outgoing_move_seq:
             self.pending_move_step = None
             self.pending_move_path = ()
+            self.last_move_target = None
             return True
         return False
 

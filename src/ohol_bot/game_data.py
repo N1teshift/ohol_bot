@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .biomes import BiomeCatalog, load_biome_catalog
 
@@ -16,6 +17,7 @@ class OholObject:
     right_blocking_radius: int = 0
     food_value: int = 0
     num_uses: int = 1
+    deadly_distance: int = 0
     spawn_biomes: frozenset[int] = frozenset()
 
 
@@ -78,6 +80,7 @@ def parse_object_file(path: str | Path) -> OholObject:
         right_blocking_radius=_safe_int(values.get("rightBlockingRadius", "0"), 0),
         food_value=_safe_int(values.get("foodValue", "0"), 0),
         num_uses=_safe_int(values.get("numUses", "1").split(",", maxsplit=1)[0], 1),
+        deadly_distance=_safe_int(values.get("deadlyDistance", "0"), 0),
         spawn_biomes=_parse_spawn_biomes(lines),
     )
 
@@ -160,3 +163,70 @@ def _parse_spawn_biomes(lines: list[str]) -> frozenset[int]:
             if token.isdigit():
                 biome_ids.add(int(token))
     return frozenset(biome_ids)
+
+
+def _normalize_object_name(name: str) -> str:
+    return name.strip().lower()
+
+
+def build_stack_collect_catalog(
+    game_data: OholGameData | None,
+) -> tuple[dict[str, Any], ...]:
+    """Map stackable loose items to pile objects and transition target ids."""
+    if game_data is None:
+        return ()
+
+    loose_by_name = {
+        _normalize_object_name(obj.name): obj for obj in game_data.objects.values()
+    }
+    rules: list[dict[str, Any]] = []
+    seen_loose_ids: set[int] = set()
+
+    for pile_obj in game_data.objects.values():
+        pile_name = _normalize_object_name(pile_obj.name)
+        if not pile_name.endswith(" pile"):
+            continue
+        loose_name = pile_name[: -len(" pile")].strip()
+        loose_obj = loose_by_name.get(loose_name)
+        if loose_obj is None or loose_obj.object_id in seen_loose_ids:
+            continue
+
+        loose_id = loose_obj.object_id
+        pile_id = pile_obj.object_id
+        seen_loose_ids.add(loose_id)
+        loose_names = (loose_name,)
+        pile_names = (pile_name,)
+        depot_target_ids = tuple(
+            sorted(
+                {
+                    transition.target_id
+                    for transition in game_data.transitions
+                    if transition.actor_id == loose_id
+                    and transition.new_target_id == pile_id
+                }
+            )
+        )
+        source_target_ids = tuple(
+            sorted(
+                {
+                    transition.target_id
+                    for transition in game_data.transitions
+                    if transition.actor_id == 0 and transition.new_actor_id == loose_id
+                }
+            )
+        )
+        aliases = tuple(sorted({loose_name, pile_name, loose_name.replace(" ", "")}))
+        rules.append(
+            {
+                "display_name": loose_obj.name,
+                "loose_names": loose_names,
+                "pile_names": pile_names,
+                "loose_object_id": loose_id,
+                "pile_object_id": pile_id,
+                "depot_target_ids": depot_target_ids,
+                "source_target_ids": source_target_ids,
+                "query_aliases": aliases,
+            }
+        )
+
+    return tuple(rules)

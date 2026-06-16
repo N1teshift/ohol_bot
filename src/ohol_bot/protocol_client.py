@@ -8,6 +8,7 @@ from hashlib import sha1
 from dataclasses import dataclass
 
 from .client import BotClient
+from .danger import danger_near_route
 from .game_data import OholGameData, load_game_data
 from .model import Action, ActionType, Observation, PlayerState, Tile, step_toward
 from .movement import PathDiagnostics, walkable_path_with_diagnostics
@@ -189,7 +190,7 @@ class OholProtocolClient(OholProtocolProbe):
             else 0
         )
         if self.game_data is None and game_data_root is not None:
-            self.game_data = load_game_data(game_data_root, include_transitions=False)
+            self.game_data = load_game_data(game_data_root, include_transitions=True)
         self.world_state = WorldState()
         self.self_player_id: int | None = None
         self.logged_in = False
@@ -244,6 +245,24 @@ class OholProtocolClient(OholProtocolProbe):
             self._poll_once()
             self._maybe_send_keep_alive()
             time.sleep(0.05)
+
+    def poll_for_window(self, duration_seconds: float) -> int:
+        """Poll the socket for up to duration_seconds.
+
+        OHOL private servers step reactively when messages arrive; steady
+        polling plus keep-alive traffic keeps FM/world ticks flowing when no
+        other players are nearby. Returns how many FM frames were received.
+        """
+        deadline = time.monotonic() + duration_seconds
+        frames = 0
+        while time.monotonic() < deadline:
+            messages = self._poll_once()
+            self._maybe_send_keep_alive()
+            if _batch_has_frame(messages):
+                frames += 1
+                self.server_frames += 1
+            time.sleep(0.002)
+        return frames
 
     def wait_for_frame(self, timeout_seconds: float = 30.0) -> bool:
         """Block until the server sends FM (end of one server time step).
@@ -408,10 +427,7 @@ class OholProtocolClient(OholProtocolProbe):
             return () if step == start else (step,)
         start_abs = self.world_state.to_absolute(start)
         target_abs = self.world_state.to_absolute(target)
-        blocked_abs = {
-            self.world_state.to_absolute(tile)
-            for tile in self.world_state.blocked_tiles
-        }
+        blocked_abs = self._path_blocked_tiles_abs()
         from .movement import resolve_approach_tile
 
         destination_abs = resolve_approach_tile(
@@ -447,16 +463,50 @@ class OholProtocolClient(OholProtocolProbe):
 
         if self.world_state.pending_force_tile is not None or self._awaiting_force_ack:
             return CAUTIOUS_MOVE_BATCH_STEPS
-        if self.world_state.blocked_tiles or self.world_state.avoid_targets:
+        if self.world_state.blocked_tiles:
+            return CAUTIOUS_MOVE_BATCH_STEPS
+        danger_tiles = self.world_state.avoid_targets
+        if danger_tiles and danger_near_route(
+            self.world_state.to_relative(start_abs),
+            self.world_state.to_relative(target_abs),
+            danger_tiles,
+        ):
             return CAUTIOUS_MOVE_BATCH_STEPS
         if self._near_known_blocker(start_abs, radius=3):
             return CAUTIOUS_MOVE_BATCH_STEPS
+        if self._last_observation is not None:
+            mode = self._last_observation.facts.get("movement_mode")
+            if mode in {"collect_stack", "collect"}:
+                if _is_open_straight_line(start_abs, target_abs) and not self._near_known_blocker(
+                    start_abs,
+                    radius=8,
+                ):
+                    return OPEN_MOVE_BATCH_STEPS
+                return MAX_MOVE_BATCH_STEPS
         if _is_open_straight_line(start_abs, target_abs) and not self._near_known_blocker(
             start_abs,
             radius=8,
         ):
             return OPEN_MOVE_BATCH_STEPS
         return MAX_MOVE_BATCH_STEPS
+
+    def _path_blocked_tiles_abs(self) -> set[Tile]:
+        from .danger import danger_path_blockers
+
+        blocked_abs = {
+            self.world_state.to_absolute(tile)
+            for tile in self.world_state.blocked_tiles
+        }
+        blocked_abs.update(
+            danger_path_blockers(
+                {
+                    self.world_state.to_absolute(tile)
+                    for tile in self.world_state.avoid_targets
+                },
+                buffer=1,
+            )
+        )
+        return blocked_abs
 
     def _near_known_blocker(self, center_abs: Tile, *, radius: int) -> bool:
         if self.game_data is None:
@@ -506,6 +556,7 @@ class OholProtocolClient(OholProtocolProbe):
         elif message.type is ProtocolMessageType.FRAME:
             if self._awaiting_force_ack:
                 self._awaiting_force_ack = False
+            self.world_state.note_server_frame()
         elif isinstance(message, LineageMessage):
             pass
         elif isinstance(message, (PlayerUpdateMessage, PlayerMovementMessage, PlayerSaysMessage, FoodChangeMessage, CravingMessage, MapChangeMessage, MapChunkMessage)):

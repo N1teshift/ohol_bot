@@ -81,7 +81,16 @@ def main() -> None:
         action="store_true",
         help="React once per server FM frame instead of --tick-seconds wall-clock polling",
     )
-    run_live_parser.add_argument("--keep-alive-interval", type=float, default=5.0)
+    run_live_parser.add_argument(
+        "--planner-hz",
+        type=float,
+        default=None,
+        help=(
+            "Fixed planner loop rate (Hz). Polls the socket and sends keep-alive at "
+            "this rate so the OHOL server keeps stepping when solo (~6 recommended)."
+        ),
+    )
+    run_live_parser.add_argument("--keep-alive-interval", type=float, default=None)
     run_live_parser.add_argument(
         "--game-data-root",
         default=".ohol_runtime/server",
@@ -120,7 +129,16 @@ def main() -> None:
         default=True,
         help="React once per server FM frame",
     )
-    play_parser.add_argument("--keep-alive-interval", type=float, default=5.0)
+    play_parser.add_argument(
+        "--planner-hz",
+        type=float,
+        default=None,
+        help=(
+            "Fixed planner loop rate (Hz). Polls the socket and sends keep-alive at "
+            "this rate so the OHOL server keeps stepping when solo (~6 recommended)."
+        ),
+    )
+    play_parser.add_argument("--keep-alive-interval", type=float, default=None)
     play_parser.add_argument(
         "--game-data-root",
         default=".ohol_runtime/server",
@@ -334,7 +352,7 @@ def main() -> None:
                 server_password=args.server_password,
                 tutorial=args.tutorial,
             ),
-            keep_alive_interval_seconds=args.keep_alive_interval,
+            keep_alive_interval_seconds=_resolve_keep_alive_interval(args),
             game_data_root=args.game_data_root,
         )
         result = run_live_episode(
@@ -343,6 +361,7 @@ def main() -> None:
             args.max_ticks,
             tick_seconds=args.tick_seconds,
             frame_paced=args.frame_paced,
+            planner_hz=args.planner_hz,
             watch=args.watch,
             forever=args.forever,
         )
@@ -370,6 +389,7 @@ def main() -> None:
             args.max_ticks,
             tick_seconds=args.tick_seconds,
             frame_paced=args.frame_paced,
+            planner_hz=args.planner_hz,
             watch=True,
             forever=args.forever,
         )
@@ -435,6 +455,15 @@ def _add_connection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tutorial", action="store_true")
 
 
+def _resolve_keep_alive_interval(args: argparse.Namespace) -> float:
+    if getattr(args, "keep_alive_interval", None) is not None:
+        return args.keep_alive_interval
+    planner_hz = getattr(args, "planner_hz", None)
+    if planner_hz is not None and planner_hz > 0:
+        return 1.0 / planner_hz
+    return 5.0
+
+
 def _build_protocol_client(args: argparse.Namespace) -> OholProtocolClient:
     return OholProtocolClient(
         host=args.host,
@@ -446,7 +475,7 @@ def _build_protocol_client(args: argparse.Namespace) -> OholProtocolClient:
             server_password=args.server_password,
             tutorial=args.tutorial,
         ),
-        keep_alive_interval_seconds=getattr(args, "keep_alive_interval", 5.0),
+        keep_alive_interval_seconds=_resolve_keep_alive_interval(args),
         game_data_root=getattr(args, "game_data_root", ".ohol_runtime/server"),
     )
 

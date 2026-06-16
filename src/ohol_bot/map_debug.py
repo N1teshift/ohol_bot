@@ -58,7 +58,7 @@ def render_observation_map(
         blocked=blocked,
         max_labels=cfg.max_object_labels,
     )
-    legend = "B=bot L=leader T=target C=collect *=path #=blocker !=avoid f=food o=object p=player"
+    legend = "B=bot L=leader T=target C=collect *=path #=blocker !=danger f=food o=object p=player"
     if labels:
         return "\n".join([*lines, legend, *labels])
     return "\n".join([*lines, legend])

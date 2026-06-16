@@ -77,6 +77,7 @@ def run_live_episode(
     *,
     tick_seconds: float = 1.0,
     frame_paced: bool = False,
+    planner_hz: float | None = None,
     watch: bool = False,
     forever: bool = False,
 ) -> EpisodeResult:
@@ -86,6 +87,7 @@ def run_live_episode(
         max_ticks=max_ticks,
         tick_seconds=tick_seconds,
         frame_paced=frame_paced,
+        planner_hz=planner_hz,
         watch=watch,
         forever=forever,
     )
@@ -103,6 +105,7 @@ class LiveSessionEngine:
         max_ticks: int,
         tick_seconds: float = 1.0,
         frame_paced: bool = False,
+        planner_hz: float | None = None,
         watch: bool = False,
         forever: bool = False,
     ) -> None:
@@ -111,6 +114,7 @@ class LiveSessionEngine:
         self.max_ticks = max_ticks
         self.tick_seconds = tick_seconds
         self.frame_paced = frame_paced
+        self.planner_hz = planner_hz
         self.watch = watch
         self.forever = forever
         self.actions: list[Action] = []
@@ -119,7 +123,14 @@ class LiveSessionEngine:
         self.interrupted = False
         self.connection_lost = False
         self.last_dashboard: str | None = None
-        self.mode = "run-live (frame-paced)" if frame_paced else "run-live"
+        self.mode = self._session_mode_label()
+
+    def _session_mode_label(self) -> str:
+        if self.planner_hz is not None and self.planner_hz > 0:
+            return f"run-live ({self.planner_hz:g} Hz)"
+        if self.frame_paced:
+            return "run-live (frame-paced)"
+        return "run-live"
 
     def run(self) -> EpisodeResult:
         if not self.client.logged_in:
@@ -148,7 +159,11 @@ class LiveSessionEngine:
                 self.client.send(action)
                 self.actions.append(action)
 
-                if not self.frame_paced and action.type is not ActionType.WAIT:
+                if (
+                    not self.frame_paced
+                    and self.planner_hz is None
+                    and action.type is not ActionType.WAIT
+                ):
                     self.client.poll_until(self.tick_seconds)
 
                 tick += 1
@@ -162,6 +177,9 @@ class LiveSessionEngine:
         return self._final_result()
 
     def _wait_for_tick(self) -> bool:
+        if self.planner_hz is not None and self.planner_hz > 0:
+            self.client.poll_for_window(1.0 / self.planner_hz)
+            return True
         if self.frame_paced:
             return self.client.wait_for_frame()
         self.client.poll_until(self.tick_seconds)
@@ -212,6 +230,7 @@ def run_live_interactive_episode(
     *,
     tick_seconds: float = 1.0,
     frame_paced: bool = True,
+    planner_hz: float | None = None,
     watch: bool = True,
     forever: bool = True,
 ) -> EpisodeResult:
@@ -262,7 +281,9 @@ def run_live_interactive_episode(
     try:
         tick = 0
         while forever or tick < max_ticks:
-            if frame_paced:
+            if planner_hz is not None and planner_hz > 0:
+                client.poll_for_window(1.0 / planner_hz)
+            elif frame_paced:
                 if not client.wait_for_frame():
                     continue
             else:
@@ -543,7 +564,11 @@ def run_live_interactive_episode(
                         )
                         last_action = action
 
-                        if not frame_paced and action.type is not ActionType.WAIT:
+                        if (
+                            not frame_paced
+                            and planner_hz is None
+                            and action.type is not ActionType.WAIT
+                        ):
                             client.poll_until(tick_seconds)
 
             if command_line is not None:

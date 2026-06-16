@@ -79,3 +79,22 @@ def test_load_game_data_can_skip_transitions(tmp_path: Path) -> None:
     assert len(full.transitions) == 1
     assert skipped.transitions == ()
     assert skipped.objects[10].name == "Test Berry"
+
+
+def test_build_stack_collect_catalog_from_runtime_objects() -> None:
+    from ohol_bot.game_data import build_stack_collect_catalog, load_game_data
+
+    root = Path(".ohol_runtime/server")
+    if not (root / "objects").exists():
+        return
+
+    game_data = load_game_data(root)
+    catalog = build_stack_collect_catalog(game_data)
+    by_loose_id = {
+        rule["loose_object_id"]: rule for rule in catalog if rule.get("loose_object_id")
+    }
+
+    assert 33 in by_loose_id
+    assert by_loose_id[33]["display_name"] == "Stone"
+    assert 674 in by_loose_id
+    assert by_loose_id[674]["display_name"] == "Limestone"

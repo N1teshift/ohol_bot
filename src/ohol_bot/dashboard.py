@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import sys
+import time
+from collections import deque
 from dataclasses import dataclass
 
-from .model import Action, ActionType, Observation, ObjectState
+from .model import Action, ActionType, Observation, ObjectState, Tile
 from .hunger import NO_MOVE_AGE, action_blocker, can_self_act
 from .map_debug import MapRenderConfig, render_observation_map
 from .protocol_client import OholProtocolClient
@@ -14,6 +16,131 @@ class DashboardFrame:
     text: str
 
 
+RATE_WINDOW_SECONDS = 5.0
+
+
+@dataclass(frozen=True, slots=True)
+class _CounterSample:
+    at: float
+    planner_tick: int | None
+    world_tick: int
+    server_frames: int
+    ka_pings: int
+
+
+class DashboardRateTracker:
+    """Track counter deltas over a rolling window for per-5s rate display."""
+
+    def __init__(self) -> None:
+        self._samples: deque[_CounterSample] = deque(maxlen=64)
+
+    def update(
+        self,
+        *,
+        planner_tick: int | None,
+        world_tick: int,
+        server_frames: int,
+        ka_pings: int,
+        now: float | None = None,
+    ) -> dict[str, float]:
+        current = _CounterSample(
+            at=now if now is not None else time.monotonic(),
+            planner_tick=planner_tick,
+            world_tick=world_tick,
+            server_frames=server_frames,
+            ka_pings=ka_pings,
+        )
+        self._samples.append(current)
+        while len(self._samples) > 2 and (
+            current.at - self._samples[0].at > RATE_WINDOW_SECONDS * 2
+        ):
+            self._samples.popleft()
+        return self._rates_per_5_seconds(current)
+
+    def _rates_per_5_seconds(self, current: _CounterSample) -> dict[str, float]:
+        baseline = self._samples[0]
+        for sample in self._samples:
+            if current.at - sample.at >= RATE_WINDOW_SECONDS:
+                baseline = sample
+                break
+
+        window = current.at - baseline.at
+        if window <= 0:
+            return {
+                "planner": 0.0,
+                "world": 0.0,
+                "server_frames": 0.0,
+                "ka": 0.0,
+            }
+
+        scale = RATE_WINDOW_SECONDS / window
+        return {
+            "planner": self._scaled_delta(
+                current.planner_tick,
+                baseline.planner_tick,
+                scale,
+            ),
+            "world": max(0, current.world_tick - baseline.world_tick) * scale,
+            "server_frames": max(0, current.server_frames - baseline.server_frames)
+            * scale,
+            "ka": max(0, current.ka_pings - baseline.ka_pings) * scale,
+        }
+
+    @staticmethod
+    def _scaled_delta(
+        current: int | None,
+        baseline: int | None,
+        scale: float,
+    ) -> float:
+        if current is None or baseline is None:
+            return 0.0
+        return max(0, current - baseline) * scale
+
+
+def _dashboard_rate_tracker(client: OholProtocolClient) -> DashboardRateTracker:
+    tracker = getattr(client, "dashboard_rate_tracker", None)
+    if tracker is None:
+        tracker = DashboardRateTracker()
+        client.dashboard_rate_tracker = tracker
+    return tracker
+
+
+def _format_rate_per_5s(rate: float) -> str:
+    if abs(rate) < 0.05:
+        return " (+0/5s)"
+    if abs(rate - round(rate)) < 0.05:
+        return f" (+{int(round(rate))}/5s)"
+    return f" (+{rate:.1f}/5s)"
+
+
+def _counter_with_rate(label: str, value: int, rate: float) -> str:
+    return f"{label} {value}{_format_rate_per_5s(rate)}"
+
+
+def _build_header_tick(
+    client: OholProtocolClient,
+    observation: Observation,
+    *,
+    tick: int | None,
+) -> str:
+    rates = _dashboard_rate_tracker(client).update(
+        planner_tick=tick,
+        world_tick=observation.tick,
+        server_frames=client.server_frames,
+        ka_pings=client._sent_keep_alives,
+    )
+    parts: list[str] = []
+    if tick is not None:
+        parts.append(_counter_with_rate("planner tick", tick, rates["planner"]))
+    parts.append(_counter_with_rate("world tick", observation.tick, rates["world"]))
+    if client.frame_paced:
+        parts.append(
+            _counter_with_rate("server frames", client.server_frames, rates["server_frames"])
+        )
+    parts.append(_counter_with_rate("KA pings", client._sent_keep_alives, rates["ka"]))
+    return "   ".join(parts)
+
+
 def explain_action(observation: Observation, action: Action | None) -> str:
     if action is None:
         return "connected, waiting for first action"
@@ -22,6 +149,11 @@ def explain_action(observation: Observation, action: Action | None) -> str:
         return f"saying: {action.payload.get('text', '')}"
 
     if action.type is ActionType.USE:
+        reason = observation.facts.get("collect_reason") or observation.facts.get("follow_reason")
+        if reason:
+            target_x = action.payload.get("target_x")
+            target_y = action.payload.get("target_y")
+            return f"using tile ({target_x}, {target_y}) ({reason})"
         food = observation.nearest_food()
         if food is not None:
             return f"using {food.name} at ({food.tile.x}, {food.tile.y})"
@@ -80,19 +212,9 @@ def format_dashboard(
         else "nobody"
     )
     if tick is not None:
-        frame_note = (
-            f"   server frames {client.server_frames}"
-            if client.frame_paced
-            else ""
-        )
-        header_tick = (
-            f"planner tick {tick}   protocol msgs {observation.tick}{frame_note}   "
-            f"KA pings {client._sent_keep_alives}"
-        )
+        header_tick = _build_header_tick(client, observation, tick=tick)
     else:
-        header_tick = (
-            f"protocol msgs {observation.tick}   KA pings {client._sent_keep_alives}"
-        )
+        header_tick = _build_header_tick(client, observation, tick=None)
     elapsed = f"  elapsed {elapsed_seconds:.0f}s" if elapsed_seconds is not None else ""
     movement_mode = observation.facts.get("movement_mode", "idle")
     follow_leader_id = observation.facts.get("follow_leader_id")
@@ -102,8 +224,10 @@ def format_dashboard(
     collect_names = observation.facts.get("collect_names", ())
     collect_target = _format_fact_tile(observation.facts.get("collect_target"))
     collect_target_name = observation.facts.get("collect_target_name")
+    collect_stack = observation.facts.get("collect_stack")
     blocked_count = len(observation.facts.get("blocked_tiles", ()))
-    avoid_count = len(observation.facts.get("avoid_targets", ()))
+    danger_count = len(observation.facts.get("avoid_targets", ()))
+    danger_preview = observation.facts.get("danger_objects", ())
     path_diagnostics = _format_path_diagnostics(observation)
     blocker = action_blocker(observation)
     last_chat = _format_last_chat(observation)
@@ -116,6 +240,7 @@ def format_dashboard(
         collect_names=collect_names,
         collect_target=collect_target,
         collect_target_name=collect_target_name,
+        collect_stack=collect_stack,
     )
 
     lines = [
@@ -149,8 +274,9 @@ def format_dashboard(
         ),
         (
             f"  Objects in range: {len(observation.nearby_objects)} (radius 24)   "
-            f"Blocked tiles: {blocked_count}   Avoid targets: {avoid_count}"
+            f"Blocked tiles: {blocked_count}   Danger tiles: {danger_count}"
         ),
+        f"  Danger nearby: {_format_danger_preview(danger_preview)}",
         f"  Last path: {path_diagnostics}",
         f"  Nearby biomes: {_format_nearby_biomes(client, observation)}",
         "",
@@ -300,7 +426,10 @@ def _format_goal(
     collect_names,
     collect_target: str,
     collect_target_name,
+    collect_stack,
 ) -> str:
+    if movement_mode == "collect_stack":
+        return _format_collect_stack_goal(collect_stack)
     if movement_mode == "collect":
         target_name = _format_collect_name(collect_names, collect_target_name)
         if collect_target != "none":
@@ -313,6 +442,18 @@ def _format_goal(
         f"follow target {follow_target}, leader {leader_id} at {leader_tile}, "
         f"dist={distance}"
     )
+
+
+def _format_collect_stack_goal(raw) -> str:
+    if not isinstance(raw, dict):
+        return "trying to collect stack"
+    item_name = raw.get("item_name") or "item"
+    deposited = raw.get("deposited_count", 0)
+    desired = raw.get("desired_count", "?")
+    depot = _format_fact_tile(raw.get("depot_tile"))
+    if depot != "none":
+        return f"collect stack {item_name} at {depot} ({deposited}/{desired})"
+    return f"collect stack {item_name} ({deposited}/{desired})"
 
 
 def _format_collect_name(collect_names, collect_target_name) -> str:
@@ -379,6 +520,20 @@ def _format_remembered_landmarks(observation: Observation) -> list[str]:
         summary = ", ".join(f"{name}={count}" for name, count in top)
         lines.append(f"  Remembered by biome: {summary}")
     return lines
+
+
+def _format_danger_preview(raw: object) -> str:
+    if not isinstance(raw, tuple) or not raw:
+        return "none"
+    parts: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name", "?")
+        x = item.get("x")
+        y = item.get("y")
+        parts.append(f"{name} ({x},{y})")
+    return ", ".join(parts) if parts else "none"
 
 
 def _format_biome(observation: Observation) -> str:

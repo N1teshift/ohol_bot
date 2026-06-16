@@ -40,5 +40,6 @@ def test_render_observation_map_marks_core_tiles() -> None:
     assert "T" in rendered
     assert "#" in rendered
     assert "!" in rendered
+    assert "!=danger" in rendered
     assert "*" in rendered
     assert "Berry" in rendered

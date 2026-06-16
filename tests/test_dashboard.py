@@ -1,4 +1,4 @@
-from ohol_bot.dashboard import explain_action, format_dashboard
+from ohol_bot.dashboard import DashboardRateTracker, explain_action, format_dashboard
 from ohol_bot.model import Action, ActionType, Observation, ObjectState, PlayerState, Tile
 
 
@@ -92,7 +92,7 @@ def test_format_dashboard_includes_movement_follow_telemetry() -> None:
     assert "Nearest remembered food" not in frame.text
     assert "Tracked tiles: 42" in frame.text
     assert "planner tick 2" in frame.text
-    assert "protocol msgs 3" in frame.text
+    assert "world tick 3" in frame.text
     assert "KA pings 0" in frame.text
     assert "Actions sent: 0" in frame.text
     assert "Connection" not in frame.text
@@ -156,3 +156,108 @@ def test_format_dashboard_includes_collect_goal() -> None:
 
     assert "Goal: trying to collect Stone at (4, 28)" in frame.text
     assert "Status: moving to (4, 28) (move to Stone)" in frame.text
+
+
+def test_format_dashboard_includes_collect_stack_progress() -> None:
+    from ohol_bot.protocol_client import OholProtocolClient
+
+    client = OholProtocolClient()
+    client.self_player_id = 5
+    observation = Observation(
+        tick=3,
+        self=PlayerState(
+            player_id=5,
+            tile=Tile(2, -1),
+            age=20.0,
+            food_store=17,
+            max_food_store=20,
+        ),
+        facts={
+            "movement_mode": "collect_stack",
+            "collect_reason": "add Stone to stack 3/6",
+            "collect_stack": {
+                "item_name": "Stone",
+                "deposited_count": 2,
+                "desired_count": 6,
+                "depot_tile": {"x": 4, "y": 28},
+            },
+        },
+    )
+
+    frame = format_dashboard(
+        client,
+        observation,
+        last_action=Action(
+            ActionType.USE,
+            {"target_x": 4, "target_y": 28, "expect_empty_hands": True},
+        ),
+        tick=2,
+        mode="run-live",
+    )
+
+    assert "Goal: collect stack Stone at (4, 28) (2/6)" in frame.text
+    assert "Status: using tile (4, 28) (add Stone to stack 3/6)" in frame.text
+
+
+def test_dashboard_rate_tracker_extrapolates_to_five_second_window() -> None:
+    tracker = DashboardRateTracker()
+
+    rates = tracker.update(
+        planner_tick=0,
+        world_tick=0,
+        server_frames=0,
+        ka_pings=0,
+        now=0.0,
+    )
+    assert rates["planner"] == 0.0
+
+    rates = tracker.update(
+        planner_tick=5,
+        world_tick=5,
+        server_frames=5,
+        ka_pings=1,
+        now=2.5,
+    )
+
+    assert rates["planner"] == 10.0
+    assert rates["world"] == 10.0
+    assert rates["server_frames"] == 10.0
+    assert rates["ka"] == 2.0
+
+
+def test_format_dashboard_shows_per_five_second_rates() -> None:
+    from unittest.mock import patch
+
+    from ohol_bot.protocol_client import OholProtocolClient
+
+    client = OholProtocolClient()
+    client.frame_paced = True
+    client.server_frames = 10
+    client._sent_keep_alives = 2
+    observation = Observation(
+        tick=10,
+        self=PlayerState(
+            player_id=1,
+            tile=Tile(0, 0),
+            age=20.0,
+            food_store=20,
+            max_food_store=20,
+        ),
+    )
+    tracker = DashboardRateTracker()
+    tracker.update(
+        planner_tick=0,
+        world_tick=0,
+        server_frames=0,
+        ka_pings=0,
+        now=0.0,
+    )
+    client.dashboard_rate_tracker = tracker
+
+    with patch("ohol_bot.dashboard.time.monotonic", return_value=2.5):
+        frame = format_dashboard(client, observation, tick=5, mode="run-live")
+
+    assert "planner tick 5 (+10/5s)" in frame.text
+    assert "world tick 10 (+20/5s)" in frame.text
+    assert "server frames 10 (+20/5s)" in frame.text
+    assert "KA pings 2 (+4/5s)" in frame.text

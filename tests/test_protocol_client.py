@@ -426,6 +426,41 @@ def test_use_self_does_not_clear_latched_hold_before_just_ate() -> None:
     assert result.facts["held_latched_id"] == 100
 
 
+def test_use_with_expect_empty_hands_clears_held_latch() -> None:
+    from ohol_bot.model import ObjectState, Observation
+
+    world = WorldState()
+    world.self_player_id = 5
+    world.players[5] = PlayerState(
+        player_id=5,
+        tile=Tile(0, 1),
+        age=18,
+        food_store=10,
+        max_food_store=20,
+        held_object_id=33,
+        held_object_name="Stone",
+        is_stationary=True,
+    )
+    world.latched_self_held_object_id = 33
+    observation = Observation(
+        tick=1,
+        self=world.players[5],
+        nearby_objects=(ObjectState(object_id=661, name="Stone Pile", tile=Tile(0, 1)),),
+    )
+
+    world.note_outgoing_action(
+        Action(
+            ActionType.USE,
+            {"target_x": 0, "target_y": 1, "expect_empty_hands": True},
+        ),
+        observation,
+    )
+    result = world.to_observation()
+
+    assert result.self.held_object_id is None
+    assert result.facts["held_latched_id"] is None
+
+
 def test_pickup_pu_without_done_moving_keeps_stationary() -> None:
     world = WorldState()
     world.self_player_id = 5

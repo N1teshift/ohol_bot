@@ -4,7 +4,8 @@ import time
 from dataclasses import dataclass, field, replace
 
 from .biomes import count_biomes_in_radius
-from .game_data import OholGameData
+from .danger import dangerous_objects_preview, dangerous_tiles, danger_path_blockers
+from .game_data import OholGameData, build_stack_collect_catalog
 from .model import Action, ActionType, ObjectState, Observation, PlayerState, Tile, step_toward
 from .movement import blocking_footprint_tiles, next_walkable_step, walkable_path
 from .spatial_memory import SpatialMemory, WORKING_RADIUS, remembered_target_fact
@@ -49,7 +50,7 @@ class WorldState:
     chat_events: list[dict[str, object]] = field(default_factory=list)
     _chat_sequence: int = 0
     _prev_self_tile: Tile | None = None
-    _unchanged_move_ticks: int = 0
+    _danger_tiles: set[Tile] = field(default_factory=set)
     spatial_memory: SpatialMemory = field(default_factory=SpatialMemory)
 
     @property
@@ -58,7 +59,7 @@ class WorldState:
 
     @property
     def avoid_targets(self) -> set[Tile]:
-        return self.feedback.avoid_targets
+        return self._danger_tiles
 
     @property
     def blocked_target_attempts(self) -> dict[Tile, int]:
@@ -107,7 +108,6 @@ class WorldState:
         path: tuple[Tile, ...] = (),
     ) -> None:
         self.feedback.note_move_sent(step, target, sequence, path)
-        self._unchanged_move_ticks = 0
         self._mark_self_moving()
 
     def note_force_truncation(self) -> None:
@@ -142,6 +142,12 @@ class WorldState:
                     blocked_abs = {
                         self.to_absolute(tile) for tile in self.blocked_tiles
                     }
+                    blocked_abs.update(
+                        danger_path_blockers(
+                            {self.to_absolute(tile) for tile in self._danger_tiles},
+                            buffer=1,
+                        )
+                    )
                     path_abs = walkable_path(
                         start_abs,
                         target_abs,
@@ -177,6 +183,15 @@ class WorldState:
 
         if action.type is ActionType.USE:
             if observation.self.held_object_id is not None or observation.self.is_holding_food:
+                if action.payload.get("expect_empty_hands"):
+                    self.pending_held_object_id = None
+                    self.pending_held_food_value = 0
+                    self.latched_self_held_object_id = None
+                    self.latched_self_held_yum = False
+                    self.expect_empty_hands = True
+                    self._clear_self_held_display()
+                    tile = Tile(action.payload["target_x"], action.payload["target_y"])
+                    self.spatial_memory.forget_tile(self.to_absolute(tile))
                 return
             tile = Tile(action.payload["target_x"], action.payload["target_y"])
             picked = _object_at(observation, tile)
@@ -201,11 +216,15 @@ class WorldState:
             self.latched_self_held_object_id = None
             self.latched_self_held_yum = False
             self.expect_empty_hands = True
+            self._clear_self_held_display()
             self._clear_eat_pending()
 
-    def apply(self, message: ProtocolMessage) -> None:
+    def note_server_frame(self) -> None:
+        """Advance world time one server step (FM frame)."""
         self.tick += 1
+        self._tick_eat_pending()
 
+    def apply(self, message: ProtocolMessage) -> None:
         if isinstance(message, LineageMessage):
             pass
         elif isinstance(message, PlayerUpdateMessage):
@@ -309,16 +328,7 @@ class WorldState:
             game_data,
         )
         previous_tile = self._prev_self_tile
-        if self.feedback.last_move_target is not None:
-            if self._prev_self_tile == self_player.tile:
-                self._unchanged_move_ticks += 1
-            else:
-                self._unchanged_move_ticks = 0
-            if self._unchanged_move_ticks >= 4:
-                self.feedback.avoid_targets.add(self.feedback.last_move_target)
-                self._unchanged_move_ticks = 0
         self._prev_self_tile = self_player.tile
-        self._tick_eat_pending()
         center_abs = self.to_absolute(self_player.tile)
         memory_stats = self.spatial_memory.sync(
             center_abs,
@@ -329,6 +339,8 @@ class WorldState:
             radius=radius,
         )
         nearby_objects = self._object_states_from_working()
+        self._danger_tiles = set(dangerous_tiles(nearby_objects, game_data))
+        danger_preview = dangerous_objects_preview(nearby_objects, game_data)
         nearest_remembered_food = self.spatial_memory.nearest_food(
             self.spatial_memory.long_term,
             center_abs,
@@ -357,6 +369,7 @@ class WorldState:
         )
         known_blocking_tiles = self._known_blocking_tiles(game_data)
         known_blocking_objects = self._known_blocking_objects(game_data)
+        stack_collect_catalog = build_stack_collect_catalog(game_data)
 
         return Observation(
             tick=self.tick,
@@ -381,10 +394,13 @@ class WorldState:
                 "nearby_biome_counts": nearby_biome_counts,
                 "avoid_targets": tuple(
                     (tile.x, tile.y)
-                    for tile in sorted(
-                        self.feedback.avoid_targets, key=lambda t: (t.x, t.y)
-                    )
+                    for tile in sorted(self._danger_tiles, key=lambda t: (t.x, t.y))
                 ),
+                "danger_tiles": tuple(
+                    (tile.x, tile.y)
+                    for tile in sorted(self._danger_tiles, key=lambda t: (t.x, t.y))
+                ),
+                "danger_objects": danger_preview,
                 "birth_tile": (
                     {"x": self.birth_tile.x, "y": self.birth_tile.y}
                     if self.birth_tile is not None
@@ -401,6 +417,7 @@ class WorldState:
                     for tile in sorted(known_blocking_tiles, key=lambda t: (t.x, t.y))
                 ),
                 "known_blocking_objects": known_blocking_objects,
+                "stack_collect_catalog": stack_collect_catalog,
                 "last_move_path": tuple(
                     (tile.x, tile.y) for tile in self.feedback.last_move_path
                 ),
@@ -503,6 +520,20 @@ class WorldState:
 
     def _clear_eat_pending(self) -> None:
         self.feedback.clear_eat_pending()
+
+    def _clear_self_held_display(self) -> None:
+        if self.self_player_id is None:
+            return
+        player = self.players.get(self.self_player_id)
+        if player is None:
+            return
+        self.players[self.self_player_id] = replace(
+            player,
+            held_object_id=None,
+            held_food_value=0,
+            held_object_name=None,
+            held_yum=False,
+        )
 
     def _tick_eat_pending(self) -> None:
         from .hunger import EAT_PENDING_TIMEOUT_TICKS
@@ -847,3 +878,5 @@ def _payload_path(raw) -> tuple[Tile, ...]:
 
 def _chebyshev(a: Tile, b: Tile) -> int:
     return max(abs(a.x - b.x), abs(a.y - b.y))
+
+

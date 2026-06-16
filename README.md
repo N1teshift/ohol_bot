@@ -24,11 +24,13 @@ scaffolding while movement is rebuilt.
 
 ```powershell
 $env:PYTHONPATH='src'
-python -m ohol_bot.cli run-live --forever --frame-paced --watch
+python -m ohol_bot.cli run-live --forever --frame-paced --planner-hz 6 --watch
 ```
 
 Say `follow` in game from the player you want the bot to follow. Say `stop follow`
-to return the bot to idle.
+to return the bot to idle. Say `collect stack stone` or `collect stack limestone`
+to run the stack helper (gather loose items and piles to a depot beside the speaker;
+default deposit count 6).
 
 While following, the bot waits on the same tile as the leader or any adjacent
 tile (Chebyshev distance <= 1). It only moves when the leader is 2+ tiles away,
@@ -53,9 +55,11 @@ manual `control` commands via `cmd>` (for example `move 5 east`, `goto 10 -3`,
 
 `play` session logs are written to `.ohol_runtime/logs/last_play.json` (includes manual command/plan events).
 
-Use `--frame-paced` for one decision per server `FM` frame (recommended). Use
-`--tick-seconds N` for slower wall-clock pacing. Use `--forever` for an
-indefinite session (Ctrl+C to stop). Use `--max-ticks N` for a timed run.
+Use `--frame-paced` for server-`FM`-aligned stepping. Add `--planner-hz 6` so the
+private server keeps stepping when you are solo (OHOL servers are message-reactive;
+without traffic they may only tick ~1/sec). Use `--tick-seconds N` for slower
+wall-clock pacing without planner-hz. Use `--forever` for an indefinite session
+(Ctrl+C to stop). Use `--max-ticks N` for a timed run.
 
 Credentials default to `bot_001@local` / key `aaaa` on `localhost:8005` (see
 [AGENTS.md](AGENTS.md)).
@@ -87,22 +91,25 @@ One-shot: `python -m ohol_bot.cli control move 10 east`. Add `--watch` for the d
 - **World state** from PU, PM, FX, MC, MX (position, hunger, map objects, players)
 - **World/action state split started**: `WorldState` (packet-derived) + `ActionFeedbackState` (move/eat/force feedback)
 - **Movement follow policy** live: idle by default, follow the player who says `follow`, return to idle on `stop follow`; wait at distance <= 1, move at distance >= 2
+- **Collect / stack chat modes:** `collect <item>` and `collect stack <item>` gather objects to a depot; stack mode uses `game_data.build_stack_collect_catalog()`, skips danger tiles, and reuses the same source briefly for smoother paths
 - **Structured chat parsing** for `PS` command events
-- **Typed planner-facts adapter** (`planner_facts.py`) used by skills for avoid/blocked/remembered targets
+- **Typed planner-facts adapter** (`planner_facts.py`) used by skills for danger/blocked/remembered targets
 - **Behavior-layer scaffold** (`behaviors.py`): `SurvivalBehavior` active, `RecipeBehavior` skeleton for next feature
 - **Obstacle-aware pathfinding** (`movement.py`): 8-way BFS around `blocksWalking`, diagonal straight-line prefixes, birth-relative coords, corner-cutting, approach tiles for blocked food, and path diagnostics
 - **Wide collision v1**: horizontal-only footprints from `leftBlockingRadius`/`rightBlockingRadius` when checking walkability
-- **Stuck avoidance:** `blocked_tiles` hard-block walking; `avoid_targets` hard-skip explore/survival paths but are a soft penalty for follow formation targets
-- **`--frame-paced` loop**: one movement decision per server **`FM`** frame; recommended for live play
-- **Movement pacing**: one policy decision per stationary frame; each `MOVE` may encode a dynamic batched path (short/cautious in follow or dense terrain, up to 10 in open straight paths)
+- **Stuck avoidance:** `blocked_tiles` (`#`) hard-block walking and remember FORCE/unreachable targets
+- **Danger avoidance:** `avoid_targets` / `danger_tiles` (`!`) mark live animals from sandbox `deadlyDistance` plus name fallback; pathfinding hard-blocks danger tiles plus a 1-tile buffer; explore/survival hard-skip danger, follow uses a soft penalty
+- **`--frame-paced` + `--planner-hz`**: server-`FM` stepping with optional fixed-rate poll/keep-alive for solo smoothness (~6 Hz recommended)
+- **World tick on `FM`**: policy settle/cooldown timers track server frames, not raw PU count
+- **Movement pacing**: one policy decision per planner tick; non-`WAIT` actions only send when stationary; each `MOVE` may encode a dynamic batched path (2 in follow or near danger/blockers; up to 6 default; up to 10 in open straight `collect` / `collect_stack` paths)
 - **Self player detection**: locked from first solo PU or first PM after our MOVE — **not** from LN
 - **Action coordinates**: `_action_tile` + `birth_tile` offset for map (absolute) vs MOVE/PU/PM (relative) coords; batched PM start coords anchor the birth offset
-- **Movement dashboard** (`--watch`): goal, last chat, action status, Chebyshev leader/player distance, follow target, blocked/avoid counts, path diagnostics, and a compact local tile map
+- **Movement dashboard** (`--watch`): goal, last chat, action status, planner/world/server/KA counters with **(+N/5s)** rates, follow/collect target, blocked/danger counts, danger nearby preview, path diagnostics, and a compact local tile map (`#` blocked, `!` danger)
 - **Manual control** (`control` CLI)
 - **`scripts/verify_bot_run.py`**: automated stuck detection after movement changes
 - Game data loader (~4400 objects, transitions) from `.ohol_runtime/server`
 - Mock scenarios and unit tests under `tests/`
-- Full regression suite currently passing: `171` tests
+- Full regression suite currently passing: `211` tests
 
 ## Bot API
 
@@ -119,7 +126,7 @@ Set `$env:PYTHONPATH='src'` first.
 
 | Command | Purpose |
 |---------|---------|
-| `run-live` | Closed loop: observe → idle/follow movement policy → act (use `--watch`) |
+| `run-live` | Closed loop: observe → idle/follow movement policy → act (use `--watch`, `--planner-hz 6`) |
 | `play` | Unified live mode: idle/follow + one-shot manual overrides + dashboard |
 | `control` | Interactive manual control — `move 10 east`, `goto x y`, `pick`, `eat`, … |
 | `stay-alive` | Stay connected; optional `--say`, `--move-x/y`, `--watch` |
@@ -132,8 +139,8 @@ Set `$env:PYTHONPATH='src'` first.
 Examples:
 
 ```powershell
-python -m ohol_bot.cli run-live --forever --frame-paced --watch
-python -m ohol_bot.cli play
+python -m ohol_bot.cli run-live --forever --frame-paced --planner-hz 6 --watch
+python -m ohol_bot.cli play --planner-hz 6
 python -m ohol_bot.cli control --frame-paced --watch
 python -m ohol_bot.cli control move 10 east
 python -m ohol_bot.cli stay-alive --seconds 60 --watch
