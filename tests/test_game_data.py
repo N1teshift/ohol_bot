@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ohol_bot.game_data import parse_object_file, parse_transition_file
+from ohol_bot.game_data import load_game_data, parse_object_file, parse_transition_file
 
 
 def test_parse_object_file(tmp_path: Path) -> None:
@@ -60,3 +60,22 @@ def test_parse_transition_file(tmp_path: Path) -> None:
     assert transition.target_id == 2
     assert transition.new_actor_id == 3
     assert transition.new_target_id == 4
+
+
+def test_load_game_data_can_skip_transitions(tmp_path: Path) -> None:
+    objects_path = tmp_path / "objects"
+    transitions_path = tmp_path / "transitions"
+    objects_path.mkdir()
+    transitions_path.mkdir()
+    (objects_path / "10.txt").write_text("id=10\nTest Berry\n", encoding="utf-8")
+    (transitions_path / "1_2_LT.txt").write_text(
+        "3 4 0 0.000000 0.000000 0 0 0 1 0 0\n",
+        encoding="utf-8",
+    )
+
+    full = load_game_data(tmp_path)
+    skipped = load_game_data(tmp_path, include_transitions=False)
+
+    assert len(full.transitions) == 1
+    assert skipped.transitions == ()
+    assert skipped.objects[10].name == "Test Berry"

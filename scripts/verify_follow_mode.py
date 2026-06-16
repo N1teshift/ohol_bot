@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from ohol_bot.map_debug import MapRenderConfig, render_observation_map
 from ohol_bot.model import ActionType, Tile
 from ohol_bot.movement_policy import MovementFollowPolicy
 from ohol_bot.protocol_client import OholProtocolClient, ProtocolCredentials
@@ -37,6 +38,9 @@ def main() -> int:
     positions: list[Tile] = []
     move_actions = 0
     leader_seen_ticks = 0
+    stagnant_ticks = 0
+    best_distance: int | None = None
+    diagnostic_snapshots: list[dict[str, object]] = []
     start = time.monotonic()
 
     client.login()
@@ -52,6 +56,34 @@ def main() -> int:
             if isinstance(distance, int):
                 distances.append(distance)
                 leader_seen_ticks += 1
+                if best_distance is None or distance < best_distance:
+                    best_distance = distance
+                    stagnant_ticks = 0
+                else:
+                    stagnant_ticks += 1
+                if stagnant_ticks in {20, 40, 80}:
+                    diagnostic_snapshots.append(
+                        {
+                            "tick": len(positions),
+                            "distance": distance,
+                            "self_tile": {
+                                "x": observation.self.tile.x,
+                                "y": observation.self.tile.y,
+                            },
+                            "leader_tile": observation.facts.get("follow_leader_tile"),
+                            "follow_target": observation.facts.get("follow_target"),
+                            "path_diagnostics": observation.facts.get(
+                                "last_path_diagnostics",
+                            ),
+                            "candidate_tiles": observation.facts.get(
+                                "follow_candidate_tiles",
+                            ),
+                            "map": render_observation_map(
+                                observation,
+                                config=MapRenderConfig(radius=8, max_object_labels=6),
+                            ),
+                        }
+                    )
             if action.type is ActionType.MOVE_TO:
                 move_actions += 1
             client.send(action)
@@ -77,6 +109,7 @@ def main() -> int:
         ),
         "final_distance": distances[-1] if distances else None,
         "server_frames": client.server_frames,
+        "diagnostic_snapshots": diagnostic_snapshots[-3:],
     }
     print(json.dumps(report, indent=2))
     return 0 if ok else 1

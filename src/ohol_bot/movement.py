@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
 
 from .game_data import OholObject
 from .model import Tile
@@ -15,6 +16,39 @@ _NEIGHBOR_OFFSETS = (
     (-1, 1),
     (-1, -1),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class PathDiagnostics:
+    start: Tile
+    target: Tile
+    effective_target: Tile | None
+    path: tuple[Tile, ...]
+    ok: bool
+    reason: str
+    method: str
+    visited_tiles: int = 0
+    max_search: int = 48
+    max_steps: int = 6
+
+    def as_fact(self) -> dict[str, object]:
+        return {
+            "start": _tile_fact(self.start),
+            "target": _tile_fact(self.target),
+            "effective_target": (
+                _tile_fact(self.effective_target)
+                if self.effective_target is not None
+                else None
+            ),
+            "path": tuple(_tile_fact(tile) for tile in self.path),
+            "path_length": len(self.path),
+            "ok": self.ok,
+            "reason": self.reason,
+            "method": self.method,
+            "visited_tiles": self.visited_tiles,
+            "max_search": self.max_search,
+            "max_steps": self.max_steps,
+        }
 
 
 def blocking_footprint_tiles(origin: Tile, obj: OholObject) -> tuple[Tile, ...]:
@@ -214,10 +248,53 @@ def walkable_path(
     blocked_tiles: set[Tile] | None = None,
 ) -> tuple[Tile, ...] | None:
     """Return a short walkable path from start toward target."""
+    result = walkable_path_with_diagnostics(
+        start,
+        target,
+        tile_objects,
+        objects,
+        max_search=max_search,
+        max_steps=max_steps,
+        blocked_tiles=blocked_tiles,
+    )
+    return result.path if result.ok else None
+
+
+def walkable_path_with_diagnostics(
+    start: Tile,
+    target: Tile,
+    tile_objects: dict[Tile, int],
+    objects: dict[int, OholObject],
+    *,
+    max_search: int = 48,
+    max_steps: int = 6,
+    blocked_tiles: set[Tile] | None = None,
+) -> PathDiagnostics:
+    """Return a short walkable path plus human-readable planning context."""
     if max_steps <= 0:
-        return ()
+        return PathDiagnostics(
+            start=start,
+            target=target,
+            effective_target=start,
+            path=(),
+            ok=True,
+            reason="no steps requested",
+            method="none",
+            max_search=max_search,
+            max_steps=max_steps,
+        )
     if start == target:
-        return ()
+        return PathDiagnostics(
+            start=start,
+            target=target,
+            effective_target=target,
+            path=(),
+            ok=True,
+            reason="already at target",
+            method="none",
+            max_search=max_search,
+            max_steps=max_steps,
+        )
     effective_target = target
     if not is_walkable(
         target, tile_objects, objects, blocked_tiles=blocked_tiles
@@ -230,7 +307,17 @@ def walkable_path(
             blocked_tiles=blocked_tiles,
         )
         if resolved is None:
-            return None
+            return PathDiagnostics(
+                start=start,
+                target=target,
+                effective_target=None,
+                path=(),
+                ok=False,
+                reason="target and adjacent approach tiles blocked",
+                method="target-resolution",
+                max_search=max_search,
+                max_steps=max_steps,
+            )
         effective_target = resolved
 
     preferred = _straight_path_prefix(
@@ -242,14 +329,26 @@ def walkable_path(
         blocked_tiles=blocked_tiles,
     )
     if preferred:
-        return preferred
+        return PathDiagnostics(
+            start=start,
+            target=target,
+            effective_target=effective_target,
+            path=preferred,
+            ok=True,
+            reason="clear straight prefix",
+            method="straight",
+            max_search=max_search,
+            max_steps=max_steps,
+        )
 
     blocked = blocked_tiles or set()
     parent: dict[Tile, Tile | None] = {start: None}
     queue: deque[Tile] = deque([start])
     found = False
+    visited = 0
     while queue:
         current = queue.popleft()
+        visited += 1
         if current.distance_to(start) > max_search:
             continue
         if current == effective_target:
@@ -270,7 +369,18 @@ def walkable_path(
             queue.append(neighbor)
 
     if not found:
-        return None
+        return PathDiagnostics(
+            start=start,
+            target=target,
+            effective_target=effective_target,
+            path=(),
+            ok=False,
+            reason="no route within search radius",
+            method="bfs",
+            visited_tiles=visited,
+            max_search=max_search,
+            max_steps=max_steps,
+        )
 
     path: list[Tile] = []
     step = effective_target
@@ -278,7 +388,19 @@ def walkable_path(
         path.append(step)
         step = parent[step]
     path.reverse()
-    return tuple(path[:max_steps])
+    truncated = tuple(path[:max_steps])
+    return PathDiagnostics(
+        start=start,
+        target=target,
+        effective_target=effective_target,
+        path=truncated,
+        ok=True,
+        reason="bfs route found",
+        method="bfs",
+        visited_tiles=visited,
+        max_search=max_search,
+        max_steps=max_steps,
+    )
 
 
 def _straight_path_prefix(
@@ -328,3 +450,7 @@ def _sign(value: int) -> int:
     if value < 0:
         return -1
     return 0
+
+
+def _tile_fact(tile: Tile) -> dict[str, int]:
+    return {"x": tile.x, "y": tile.y}

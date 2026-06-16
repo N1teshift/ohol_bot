@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from .client import BotClient
 from .game_data import OholGameData, load_game_data
 from .model import Action, ActionType, Observation, PlayerState, Tile, step_toward
-from .movement import walkable_path
+from .movement import PathDiagnostics, walkable_path_with_diagnostics
 from .protocol_messages import (
     CompressedMessage,
     CravingMessage,
@@ -30,7 +30,9 @@ from .protocol_framing import ProtocolFrameReader
 from .world_state import WorldState
 
 _SERVER_LOG_SAY_MARKER = "Got client message from "
+CAUTIOUS_MOVE_BATCH_STEPS = 2
 MAX_MOVE_BATCH_STEPS = 6
+OPEN_MOVE_BATCH_STEPS = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,7 +189,7 @@ class OholProtocolClient(OholProtocolProbe):
             else 0
         )
         if self.game_data is None and game_data_root is not None:
-            self.game_data = load_game_data(game_data_root)
+            self.game_data = load_game_data(game_data_root, include_transitions=False)
         self.world_state = WorldState()
         self.self_player_id: int | None = None
         self.logged_in = False
@@ -421,17 +423,51 @@ class OholProtocolClient(OholProtocolProbe):
         )
         if destination_abs is None:
             return ()
-        path_abs = walkable_path(
+        max_steps = self._move_batch_steps(start_abs, destination_abs)
+        diagnostics = walkable_path_with_diagnostics(
             start_abs,
             destination_abs,
             self.world_state.tile_objects,
             self.game_data.objects,
-            max_steps=MAX_MOVE_BATCH_STEPS,
+            max_steps=max_steps,
             blocked_tiles=blocked_abs,
         )
-        if not path_abs:
+        self.world_state.feedback.note_path_diagnostics(
+            _relative_path_diagnostics(diagnostics, self.world_state.to_relative)
+        )
+        if not diagnostics.ok or not diagnostics.path:
             return ()
-        return tuple(self.world_state.to_relative(tile) for tile in path_abs)
+        return tuple(self.world_state.to_relative(tile) for tile in diagnostics.path)
+
+    def _move_batch_steps(self, start_abs: Tile, target_abs: Tile) -> int:
+        if self._last_observation is not None:
+            mode = self._last_observation.facts.get("movement_mode")
+            if mode == "follow":
+                return CAUTIOUS_MOVE_BATCH_STEPS
+
+        if self.world_state.pending_force_tile is not None or self._awaiting_force_ack:
+            return CAUTIOUS_MOVE_BATCH_STEPS
+        if self.world_state.blocked_tiles or self.world_state.avoid_targets:
+            return CAUTIOUS_MOVE_BATCH_STEPS
+        if self._near_known_blocker(start_abs, radius=3):
+            return CAUTIOUS_MOVE_BATCH_STEPS
+        if _is_open_straight_line(start_abs, target_abs) and not self._near_known_blocker(
+            start_abs,
+            radius=8,
+        ):
+            return OPEN_MOVE_BATCH_STEPS
+        return MAX_MOVE_BATCH_STEPS
+
+    def _near_known_blocker(self, center_abs: Tile, *, radius: int) -> bool:
+        if self.game_data is None:
+            return False
+        for object_tile, object_id in self.world_state.tile_objects.items():
+            obj = self.game_data.objects.get(object_id)
+            if obj is None or not obj.blocks_walking:
+                continue
+            if max(abs(object_tile.x - center_abs.x), abs(object_tile.y - center_abs.y)) <= radius:
+                return True
+        return False
 
     def _maybe_lock_self_player_id(self, player_id: int) -> None:
         if self._self_player_id_locked:
@@ -490,7 +526,15 @@ class OholProtocolClient(OholProtocolProbe):
 
         for entry in message.players:
             if entry.player_id == self.self_player_id:
-                if entry.x is not None and entry.y is not None:
+                if (
+                    entry.x is not None
+                    and entry.y is not None
+                    and (
+                        entry.force_position
+                        or entry.done_moving_seq > 0
+                        or not self.world_state.move_in_flight()
+                    )
+                ):
                     self._sync_self_tile(Tile(entry.x, entry.y))
 
     def _maybe_lock_self_from_player_update(self, message: PlayerUpdateMessage) -> None:
@@ -508,7 +552,10 @@ class OholProtocolClient(OholProtocolProbe):
                 self._maybe_lock_self_player_id(entry.player_id)
                 self._awaiting_move_self_confirm = False
             if entry.player_id == self.self_player_id:
-                if entry.x is not None and entry.y is not None:
+                player = self.world_state.players.get(entry.player_id)
+                if player is not None:
+                    self._sync_self_tile(player.tile)
+                elif entry.x is not None and entry.y is not None:
                     self._sync_self_tile(Tile(entry.x, entry.y))
 
     def _maybe_send_pending_force(self) -> None:
@@ -564,6 +611,37 @@ def _batch_has_frame(messages: tuple[ProtocolMessage, ...]) -> bool:
         if isinstance(message, CompressedMessage) and _batch_has_frame(message.decompressed):
             return True
     return False
+
+
+def _relative_path_diagnostics(
+    diagnostics: PathDiagnostics,
+    to_relative,
+) -> dict[str, object]:
+    def tile_fact(tile: Tile | None) -> dict[str, int] | None:
+        if tile is None:
+            return None
+        rel = to_relative(tile)
+        return {"x": rel.x, "y": rel.y}
+
+    return {
+        "start": tile_fact(diagnostics.start),
+        "target": tile_fact(diagnostics.target),
+        "effective_target": tile_fact(diagnostics.effective_target),
+        "path": tuple(tile_fact(tile) for tile in diagnostics.path),
+        "path_length": len(diagnostics.path),
+        "ok": diagnostics.ok,
+        "reason": diagnostics.reason,
+        "method": diagnostics.method,
+        "visited_tiles": diagnostics.visited_tiles,
+        "max_search": diagnostics.max_search,
+        "max_steps": diagnostics.max_steps,
+    }
+
+
+def _is_open_straight_line(start: Tile, target: Tile) -> bool:
+    dx = target.x - start.x
+    dy = target.y - start.y
+    return dx == 0 or dy == 0 or abs(dx) == abs(dy)
 
 
 def _player_says_from_server_log_line(line: str) -> PlayerSaysMessage | None:

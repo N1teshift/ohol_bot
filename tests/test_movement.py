@@ -6,6 +6,7 @@ from ohol_bot.movement import (
     next_walkable_step,
     tile_blocks_walking,
     walkable_path,
+    walkable_path_with_diagnostics,
 )
 
 
@@ -128,6 +129,48 @@ def test_walkable_path_routes_around_tree() -> None:
     assert path[0] != start
 
 
+def test_walkable_path_diagnostics_explain_route_method() -> None:
+    start = Tile(0, 0)
+    target = Tile(3, 0)
+    tile_objects = {Tile(1, 0): 63}
+    objects = {63: _tree()}
+
+    result = walkable_path_with_diagnostics(
+        start,
+        target,
+        tile_objects,
+        objects,
+        max_steps=4,
+    )
+
+    assert result.ok is True
+    assert result.method == "bfs"
+    assert result.reason == "bfs route found"
+    assert Tile(1, 0) not in result.path
+
+
+def test_walkable_path_diagnostics_explain_unreachable_target() -> None:
+    start = Tile(0, 0)
+    target = Tile(2, 0)
+    tile_objects = {
+        Tile(1, 0): 63,
+        Tile(0, 1): 63,
+        Tile(0, -1): 63,
+        Tile(-1, 0): 63,
+        Tile(1, 1): 63,
+        Tile(1, -1): 63,
+        Tile(-1, 1): 63,
+        Tile(-1, -1): 63,
+    }
+    objects = {63: _tree()}
+
+    result = walkable_path_with_diagnostics(start, target, tile_objects, objects)
+
+    assert result.ok is False
+    assert result.path == ()
+    assert result.reason == "no route within search radius"
+
+
 def test_next_walkable_step_returns_none_when_unreachable() -> None:
     start = Tile(0, 0)
     target = Tile(2, 0)
@@ -236,6 +279,75 @@ def test_send_uses_batched_move_when_path_is_clear() -> None:
     assert client.sent_messages == ["MOVE 0 0 @1 1 0 2 0 3 0 4 0 5 0 6 0#"]
 
 
+def test_send_uses_longer_batch_on_open_straight_path() -> None:
+    from ohol_bot.game_data import OholGameData
+    from ohol_bot.model import Action, ActionType, Observation, PlayerState
+    from ohol_bot.protocol_client import OholProtocolClient
+
+    client = OholProtocolClient(
+        game_data=OholGameData(
+            objects={},
+            transitions=(),
+            biomes=__import__("ohol_bot.biomes", fromlist=["BiomeCatalog"]).BiomeCatalog({}),
+        )
+    )
+    client._self_player_id_locked = True
+    client._action_tile = Tile(0, 0)
+    client._last_observation = Observation(
+        tick=0,
+        self=PlayerState(
+            player_id=1,
+            tile=Tile(0, 0),
+            age=18,
+            food_store=10,
+            max_food_store=20,
+            is_stationary=True,
+        ),
+    )
+    client.socket = type("Sock", (), {"sendall": lambda self, data: None})()
+
+    client.send(Action(ActionType.MOVE_TO, {"x": 10, "y": 0}))
+
+    assert client.sent_messages == [
+        "MOVE 0 0 @1 1 0 2 0 3 0 4 0 5 0 6 0 7 0 8 0 9 0 10 0#"
+    ]
+    assert client.world_state.feedback.last_path_diagnostics["max_steps"] == 10
+
+
+def test_send_uses_short_batch_while_following() -> None:
+    from ohol_bot.game_data import OholGameData
+    from ohol_bot.model import Action, ActionType, Observation, PlayerState
+    from ohol_bot.protocol_client import OholProtocolClient
+
+    client = OholProtocolClient(
+        game_data=OholGameData(
+            objects={},
+            transitions=(),
+            biomes=__import__("ohol_bot.biomes", fromlist=["BiomeCatalog"]).BiomeCatalog({}),
+        )
+    )
+    client._self_player_id_locked = True
+    client._action_tile = Tile(0, 0)
+    client._last_observation = Observation(
+        tick=0,
+        self=PlayerState(
+            player_id=1,
+            tile=Tile(0, 0),
+            age=18,
+            food_store=10,
+            max_food_store=20,
+            is_stationary=True,
+        ),
+        facts={"movement_mode": "follow"},
+    )
+    client.socket = type("Sock", (), {"sendall": lambda self, data: None})()
+
+    client.send(Action(ActionType.MOVE_TO, {"x": 6, "y": 0}))
+
+    assert client.sent_messages == ["MOVE 0 0 @1 1 0 2 0#"]
+    assert client.world_state.feedback.last_path_diagnostics["max_steps"] == 2
+
+
 def test_send_uses_batched_diagonal_move_when_path_is_clear() -> None:
     from ohol_bot.game_data import OholGameData
     from ohol_bot.model import Action, ActionType, Observation, PlayerState
@@ -310,3 +422,8 @@ def test_send_skips_move_when_blocked() -> None:
     assert client.sent_messages == []
     assert client._actions_sent == 0
     assert client.world_state.blocked_target_attempts.get(Tile(2, 0)) == 1
+    assert client.world_state.feedback.last_path_diagnostics["ok"] is False
+    assert (
+        client.world_state.feedback.last_path_diagnostics["reason"]
+        == "no route within search radius"
+    )

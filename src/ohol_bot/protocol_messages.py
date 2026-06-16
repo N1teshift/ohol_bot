@@ -59,6 +59,8 @@ class PlayerUpdateEntry:
 @dataclass(frozen=True, slots=True)
 class PlayerMovementEntry:
     player_id: int
+    start_x: int | None = None
+    start_y: int | None = None
     x: int | None = None
     y: int | None = None
     raw_fields: tuple[str, ...] = ()
@@ -287,6 +289,8 @@ def _parse_player_movement(raw: str) -> PlayerMovementMessage:
         entries.append(
             PlayerMovementEntry(
                 player_id=_safe_int(fields[0], -1),
+                start_x=start_x,
+                start_y=start_y,
                 x=x,
                 y=y,
                 raw_fields=fields,

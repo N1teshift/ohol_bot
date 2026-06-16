@@ -41,11 +41,15 @@ class OholGameData:
         return self.biomes.biome_name(biome_id)
 
 
-def load_game_data(root: str | Path) -> OholGameData:
+def load_game_data(root: str | Path, *, include_transitions: bool = True) -> OholGameData:
     root_path = Path(root)
     return OholGameData(
         objects=load_objects(root_path / "objects"),
-        transitions=load_transitions(root_path / "transitions"),
+        transitions=(
+            load_transitions(root_path / "transitions")
+            if include_transitions
+            else tuple()
+        ),
         biomes=load_biome_catalog(root_path),
     )
 

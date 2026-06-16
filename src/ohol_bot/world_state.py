@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 from .biomes import count_biomes_in_radius
 from .game_data import OholGameData
 from .model import Action, ActionType, ObjectState, Observation, PlayerState, Tile, step_toward
-from .movement import next_walkable_step, walkable_path
+from .movement import blocking_footprint_tiles, next_walkable_step, walkable_path
 from .spatial_memory import SpatialMemory, WORKING_RADIUS, remembered_target_fact
 from .world_feedback import ActionFeedbackState
 from .protocol_messages import (
@@ -224,7 +224,13 @@ class WorldState:
                 player = self.players[entry.player_id]
                 absolute = Tile(entry.x, entry.y)
                 if entry.player_id == self.self_player_id:
-                    self.maybe_set_birth_from_absolute(absolute, player.tile)
+                    if entry.start_x is not None and entry.start_y is not None:
+                        self.maybe_set_birth_from_absolute(
+                            Tile(entry.start_x, entry.start_y),
+                            player.tile,
+                        )
+                    else:
+                        self.maybe_set_birth_from_absolute(absolute, player.tile)
                     new_tile = self.to_relative(absolute)
                     if new_tile != player.tile:
                         self._mark_self_moving()
@@ -349,6 +355,8 @@ class WorldState:
             if game_data is not None and self_biome_id is not None
             else None
         )
+        known_blocking_tiles = self._known_blocking_tiles(game_data)
+        known_blocking_objects = self._known_blocking_objects(game_data)
 
         return Observation(
             tick=self.tick,
@@ -388,6 +396,15 @@ class WorldState:
                         self.feedback.blocked_tiles, key=lambda t: (t.x, t.y)
                     )
                 ),
+                "known_blocking_tiles": tuple(
+                    (tile.x, tile.y)
+                    for tile in sorted(known_blocking_tiles, key=lambda t: (t.x, t.y))
+                ),
+                "known_blocking_objects": known_blocking_objects,
+                "last_move_path": tuple(
+                    (tile.x, tile.y) for tile in self.feedback.last_move_path
+                ),
+                "last_path_diagnostics": dict(self.feedback.last_path_diagnostics),
                 "previous_tile": (
                     {"x": previous_tile.x, "y": previous_tile.y}
                     if previous_tile is not None
@@ -514,6 +531,8 @@ class WorldState:
                 if self.feedback.note_move_confirmed(entry.done_moving_seq):
                     self._mark_self_stationary()
                     is_stationary = True
+            elif self.move_in_flight() and existing is not None:
+                tile = existing.tile
             if entry.age is not None:
                 self.self_age_base = entry.age
                 self.self_age_set_at = time.monotonic()
@@ -594,6 +613,13 @@ class WorldState:
             self.pending_held_object_id = None
             self.pending_held_food_value = 0
             return self.latched_self_held_object_id
+
+        if self.pending_held_object_id is not None:
+            self.pending_held_object_id = None
+            self.pending_held_food_value = 0
+            self.latched_self_held_object_id = None
+            self.expect_empty_hands = False
+            return None
 
         if entry.done_moving_seq > 0 and not entry.held_yum:
             self.latched_self_held_object_id = None
@@ -759,6 +785,45 @@ class WorldState:
 
     def floor_at(self, tile: Tile) -> int | None:
         return self.tile_floors.get(tile)
+
+    def _known_blocking_tiles(self, game_data: OholGameData | None) -> set[Tile]:
+        if game_data is None:
+            return set()
+        tiles: set[Tile] = set()
+        for object_tile, object_id in self.tile_objects.items():
+            obj = game_data.objects.get(object_id)
+            if obj is None or not obj.blocks_walking:
+                continue
+            for tile in blocking_footprint_tiles(object_tile, obj):
+                tiles.add(self.to_relative(tile))
+        return tiles
+
+    def _known_blocking_objects(
+        self,
+        game_data: OholGameData | None,
+        *,
+        limit: int = 16,
+    ) -> tuple[dict[str, object], ...]:
+        if game_data is None:
+            return ()
+        center_abs = self._self_center_abs()
+        entries: list[tuple[int, int, int, str]] = []
+        for object_tile, object_id in self.tile_objects.items():
+            obj = game_data.objects.get(object_id)
+            if obj is None or not obj.blocks_walking:
+                continue
+            distance = object_tile.distance_to(center_abs) if center_abs is not None else 0
+            entries.append((distance, object_tile.x, object_tile.y, obj.name))
+        entries.sort()
+        return tuple(
+            {
+                "x": self.to_relative(Tile(x, y)).x,
+                "y": self.to_relative(Tile(x, y)).y,
+                "name": name,
+                "distance": distance,
+            }
+            for distance, x, y, name in entries[:limit]
+        )
 
 
 def _object_at(observation: Observation, tile: Tile) -> ObjectState | None:

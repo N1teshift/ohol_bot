@@ -21,6 +21,8 @@ class ActionFeedbackState:
     avoid_targets: set[Tile] = field(default_factory=set)
     blocked_target_attempts: dict[Tile, int] = field(default_factory=dict)
     last_move_target: Tile | None = None
+    last_move_path: tuple[Tile, ...] = ()
+    last_path_diagnostics: dict[str, object] = field(default_factory=dict)
 
     @property
     def eat_pending_facts_value(self) -> bool:
@@ -36,7 +38,11 @@ class ActionFeedbackState:
         self.last_outgoing_move_seq = sequence
         self.pending_move_step = step
         self.pending_move_path = path or (step,)
+        self.last_move_path = path or (step,)
         self.last_move_target = target
+
+    def note_path_diagnostics(self, diagnostics: dict[str, object]) -> None:
+        self.last_path_diagnostics = diagnostics
 
     def note_force_truncation(self) -> None:
         for tile in self.pending_move_path:

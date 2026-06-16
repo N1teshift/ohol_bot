@@ -90,19 +90,19 @@ One-shot: `python -m ohol_bot.cli control move 10 east`. Add `--watch` for the d
 - **Structured chat parsing** for `PS` command events
 - **Typed planner-facts adapter** (`planner_facts.py`) used by skills for avoid/blocked/remembered targets
 - **Behavior-layer scaffold** (`behaviors.py`): `SurvivalBehavior` active, `RecipeBehavior` skeleton for next feature
-- **Obstacle-aware pathfinding** (`movement.py`): 8-way BFS around `blocksWalking`, diagonal straight-line prefixes, birth-relative coords, corner-cutting, approach tiles for blocked food
+- **Obstacle-aware pathfinding** (`movement.py`): 8-way BFS around `blocksWalking`, diagonal straight-line prefixes, birth-relative coords, corner-cutting, approach tiles for blocked food, and path diagnostics
 - **Wide collision v1**: horizontal-only footprints from `leftBlockingRadius`/`rightBlockingRadius` when checking walkability
 - **Stuck avoidance:** `blocked_tiles` hard-block walking; `avoid_targets` hard-skip explore/survival paths but are a soft penalty for follow formation targets
 - **`--frame-paced` loop**: one movement decision per server **`FM`** frame; recommended for live play
-- **Movement pacing**: one policy decision per stationary frame; each `MOVE` may encode a short batched path (cardinal + diagonal offsets, up to 6 steps) when the path is clear
+- **Movement pacing**: one policy decision per stationary frame; each `MOVE` may encode a dynamic batched path (short/cautious in follow or dense terrain, up to 10 in open straight paths)
 - **Self player detection**: locked from first solo PU or first PM after our MOVE — **not** from LN
-- **Action coordinates**: `_action_tile` + `birth_tile` offset for map (absolute) vs MOVE (relative) coords
-- **Movement dashboard** (`--watch`): goal, last chat, action status, Chebyshev leader/player distance, follow target, blocked/avoid counts
+- **Action coordinates**: `_action_tile` + `birth_tile` offset for map (absolute) vs MOVE/PU/PM (relative) coords; batched PM start coords anchor the birth offset
+- **Movement dashboard** (`--watch`): goal, last chat, action status, Chebyshev leader/player distance, follow target, blocked/avoid counts, path diagnostics, and a compact local tile map
 - **Manual control** (`control` CLI)
 - **`scripts/verify_bot_run.py`**: automated stuck detection after movement changes
 - Game data loader (~4400 objects, transitions) from `.ohol_runtime/server`
 - Mock scenarios and unit tests under `tests/`
-- Full regression suite currently passing: `148` tests
+- Full regression suite currently passing: `171` tests
 
 ## Bot API
 
@@ -174,7 +174,7 @@ Separate credentials per bot copy avoid Steam single-session disconnects.
 | Basic survival (food, home, branches) | Done |
 | Live forage → pick up → eat (`USE_SELF`) | **Verified** |
 | `--frame-paced` + movement gating | **Verified** |
-| Obstacle-aware pathfinding (8-way BFS + diagonal prefixes) | Done |
+| Obstacle-aware pathfinding (8-way BFS + diagonal prefixes + diagnostics) | Done |
 | Stuck-on-tree avoidance + verify script | **Done** |
 | Manual terminal control | **Done** |
 | Self-id + action-tile + birth-tile coords | Done |
@@ -186,6 +186,7 @@ Separate credentials per bot copy avoid Steam single-session disconnects.
 | RecipeBehavior v1 (opt-in gather) | Done |
 | Transition-driven recipe input selection | Done |
 | Wide collision footprint checks | Done (horizontal v1) |
+| Local movement map diagnostics | Done |
 | Recipe / transition planner (fire, tools) | Not started |
 | Multi-bot family coordinator | Skeleton only |
 

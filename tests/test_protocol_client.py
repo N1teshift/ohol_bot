@@ -1,6 +1,6 @@
 from ohol_bot.biomes import BiomeCatalog
 from ohol_bot.game_data import OholGameData
-from ohol_bot.model import Action, ActionType, Tile
+from ohol_bot.model import Action, ActionType, PlayerState, Tile
 from ohol_bot.protocol_client import (
     OholProtocolClient,
     ProtocolCredentials,
@@ -8,7 +8,12 @@ from ohol_bot.protocol_client import (
     _self_player_id_from_server_log_line,
     serialize_action,
 )
-from ohol_bot.protocol_messages import PlayerUpdateMessage, ProtocolMessageType, parse_protocol_message
+from ohol_bot.protocol_messages import (
+    PlayerUpdateEntry,
+    PlayerUpdateMessage,
+    ProtocolMessageType,
+    parse_protocol_message,
+)
 from ohol_bot.world_state import WorldState
 
 
@@ -187,6 +192,22 @@ def test_client_updates_tile_from_player_movement() -> None:
     assert client.current_tile == Tile(2, -1)
 
 
+def test_world_state_sets_birth_from_batched_pm_start_not_final() -> None:
+    world = WorldState()
+    world.self_player_id = 5
+    world.apply(
+        parse_protocol_message(
+            "PU\n5 0 0 0 0 0 0 0 0 0 0 0 0 0 9 -3 18.0 15.0 4.0"
+        )
+    )
+
+    world.apply(parse_protocol_message("PM\n5 -471 -137 0 0 0 1 1 1 2"))
+
+    assert world.birth_tile == Tile(-480, -134)
+    assert world.players[5].tile == Tile(10, -1)
+    assert world.to_relative(Tile(-470, -135)) == Tile(10, -1)
+
+
 def test_world_state_exposes_chat_events() -> None:
     world = WorldState()
     world.self_player_id = 5
@@ -318,6 +339,39 @@ def test_world_state_tracks_pending_pickup_until_pu_confirms() -> None:
     assert confirmed.self.held_object_id == 100
     assert confirmed.self.held_pending is False
     assert confirmed.self.held_yum is True
+
+
+def test_world_state_clears_pending_pickup_on_empty_hands_pu() -> None:
+    from ohol_bot.model import Action, ActionType, ObjectState, Observation, PlayerState, Tile
+
+    world = WorldState()
+    world.self_player_id = 5
+    world.apply(parse_protocol_message("PU\n5 0 0 0 0 0 0 0 0 0 0 0 0 0 1 2 18.0 15.0 4.0"))
+    observation = Observation(
+        tick=1,
+        self=PlayerState(
+            player_id=5,
+            tile=Tile(1, 2),
+            age=18.0,
+            food_store=1,
+            max_food_store=2,
+        ),
+        nearby_objects=(
+            ObjectState(object_id=33, name="Stone", tile=Tile(1, 2)),
+        ),
+    )
+    world.note_outgoing_action(Action(ActionType.PICK_UP, {"x": 1, "y": 2}), observation)
+    pending = world.to_observation()
+    assert pending.self.held_object_id == 33
+    assert pending.self.held_pending is True
+
+    world.apply(parse_protocol_message("PU\n5 0 0 0 0 0 0 0 0 0 0 0 0 0 1 2 18.0 15.0 4.0"))
+
+    cleared = world.to_observation()
+    assert cleared.self.held_object_id is None
+    assert cleared.self.held_pending is False
+    assert cleared.facts["held_pending_id"] is None
+    assert cleared.facts["held_latched_id"] is None
 
 
 def test_stale_empty_pu_does_not_clear_latched_hold() -> None:
@@ -505,3 +559,88 @@ def test_send_waits_for_force_ack_before_next_move() -> None:
     client.send(Action(ActionType.MOVE_TO, {"x": 10, "y": 0}))
 
     assert client.sent_messages == []
+
+
+def test_world_state_ignores_stale_self_pu_position_while_moving() -> None:
+    world = WorldState()
+    world.self_player_id = 5
+    world.players[5] = PlayerState(
+        player_id=5,
+        tile=Tile(0, 0),
+        age=18,
+        food_store=10,
+        max_food_store=20,
+        is_stationary=True,
+    )
+    world.note_move_sent(Tile(1, 0), Tile(1, 0), sequence=1, path=(Tile(1, 0),))
+    world.players[5] = PlayerState(
+        player_id=5,
+        tile=Tile(1, 0),
+        age=18,
+        food_store=10,
+        max_food_store=20,
+        is_stationary=False,
+    )
+
+    world.apply(
+        PlayerUpdateMessage(
+            ProtocolMessageType.PLAYER_UPDATE,
+            "PU",
+            players=(
+                PlayerUpdateEntry(
+                    player_id=5,
+                    x=0,
+                    y=0,
+                    age=18,
+                    done_moving_seq=0,
+                    holding_field_present=True,
+                ),
+            ),
+        )
+    )
+
+    assert world.players[5].tile == Tile(1, 0)
+    assert world.players[5].is_stationary is False
+
+
+def test_client_does_not_sync_action_tile_from_stale_self_pu() -> None:
+    client = OholProtocolClient()
+    client.self_player_id = 5
+    client.world_state.self_player_id = 5
+    client._self_player_id_locked = True
+    client._action_tile = Tile(1, 0)
+    client.current_tile = Tile(1, 0)
+    client.world_state.players[5] = PlayerState(
+        player_id=5,
+        tile=Tile(1, 0),
+        age=18,
+        food_store=10,
+        max_food_store=20,
+        is_stationary=False,
+    )
+    client.world_state.note_move_sent(
+        Tile(1, 0),
+        Tile(1, 0),
+        sequence=1,
+        path=(Tile(1, 0),),
+    )
+
+    client._sync_self_from_player_updates(
+        PlayerUpdateMessage(
+            ProtocolMessageType.PLAYER_UPDATE,
+            "PU",
+            players=(
+                PlayerUpdateEntry(
+                    player_id=5,
+                    x=0,
+                    y=0,
+                    age=18,
+                    done_moving_seq=0,
+                    holding_field_present=True,
+                ),
+            ),
+        )
+    )
+
+    assert client.current_tile == Tile(1, 0)
+    assert client._action_tile == Tile(1, 0)

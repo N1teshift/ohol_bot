@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from .model import Action, ActionType, Observation, ObjectState
 from .hunger import NO_MOVE_AGE, action_blocker, can_self_act
+from .map_debug import MapRenderConfig, render_observation_map
 from .protocol_client import OholProtocolClient
 
 
@@ -35,7 +36,7 @@ def explain_action(observation: Observation, action: Action | None) -> str:
     if action.type is ActionType.MOVE_TO:
         target_x = action.payload.get("x")
         target_y = action.payload.get("y")
-        reason = observation.facts.get("follow_reason")
+        reason = observation.facts.get("collect_reason") or observation.facts.get("follow_reason")
         if reason:
             return f"moving to ({target_x}, {target_y}) ({reason})"
         return f"moving to ({target_x}, {target_y})"
@@ -56,7 +57,7 @@ def explain_action(observation: Observation, action: Action | None) -> str:
         blocker = action_blocker(observation)
         if blocker:
             return f"waiting ({blocker})"
-        reason = observation.facts.get("follow_reason")
+        reason = observation.facts.get("collect_reason") or observation.facts.get("follow_reason")
         return f"waiting ({reason or 'idle'})"
 
     return action.type.value
@@ -98,8 +99,12 @@ def format_dashboard(
     follow_distance = observation.facts.get("follow_leader_distance")
     follow_target = _format_fact_tile(observation.facts.get("follow_target"))
     follow_leader_tile = _format_fact_tile(observation.facts.get("follow_leader_tile"))
+    collect_names = observation.facts.get("collect_names", ())
+    collect_target = _format_fact_tile(observation.facts.get("collect_target"))
+    collect_target_name = observation.facts.get("collect_target_name")
     blocked_count = len(observation.facts.get("blocked_tiles", ()))
     avoid_count = len(observation.facts.get("avoid_targets", ()))
+    path_diagnostics = _format_path_diagnostics(observation)
     blocker = action_blocker(observation)
     last_chat = _format_last_chat(observation)
     goal = _format_goal(
@@ -108,6 +113,9 @@ def format_dashboard(
         leader_tile=follow_leader_tile,
         leader_distance=follow_distance,
         follow_target=follow_target,
+        collect_names=collect_names,
+        collect_target=collect_target,
+        collect_target_name=collect_target_name,
     )
 
     lines = [
@@ -143,7 +151,17 @@ def format_dashboard(
             f"  Objects in range: {len(observation.nearby_objects)} (radius 24)   "
             f"Blocked tiles: {blocked_count}   Avoid targets: {avoid_count}"
         ),
+        f"  Last path: {path_diagnostics}",
         f"  Nearby biomes: {_format_nearby_biomes(client, observation)}",
+        "",
+        "Local Tile Map",
+        *(
+            f"  {line}"
+            for line in render_observation_map(
+                observation,
+                config=MapRenderConfig(radius=8, max_object_labels=4),
+            ).splitlines()
+        ),
         "",
         "Nearby players",
     ]
@@ -279,7 +297,15 @@ def _format_goal(
     leader_tile: str,
     leader_distance,
     follow_target: str,
+    collect_names,
+    collect_target: str,
+    collect_target_name,
 ) -> str:
+    if movement_mode == "collect":
+        target_name = _format_collect_name(collect_names, collect_target_name)
+        if collect_target != "none":
+            return f"trying to collect {target_name} at {collect_target}"
+        return f"trying to collect {target_name}"
     if movement_mode != "follow" or leader_id is None:
         return "none"
     distance = leader_distance if leader_distance is not None else "unknown"
@@ -287,6 +313,14 @@ def _format_goal(
         f"follow target {follow_target}, leader {leader_id} at {leader_tile}, "
         f"dist={distance}"
     )
+
+
+def _format_collect_name(collect_names, collect_target_name) -> str:
+    if isinstance(collect_target_name, str) and collect_target_name:
+        return collect_target_name
+    if isinstance(collect_names, tuple) and collect_names:
+        return "/".join(str(name) for name in collect_names)
+    return "item"
 
 
 def _format_last_chat(observation: Observation) -> str:
@@ -370,3 +404,15 @@ def _format_nearby_biomes(client: OholProtocolClient, observation: Observation) 
             label = f"Biome {biome_id}"
         parts.append(f"{label}={counts[biome_id]}")
     return ", ".join(parts)
+
+
+def _format_path_diagnostics(observation: Observation) -> str:
+    raw = observation.facts.get("last_path_diagnostics")
+    if not isinstance(raw, dict) or not raw:
+        return "none yet"
+    ok = "ok" if raw.get("ok") else "failed"
+    reason = raw.get("reason", "unknown")
+    method = raw.get("method", "unknown")
+    length = raw.get("path_length", 0)
+    max_steps = raw.get("max_steps", "?")
+    return f"{ok}, {method}, len={length}/{max_steps}, {reason}"

@@ -121,3 +121,38 @@ def test_format_dashboard_shows_idle_movement_mode() -> None:
     assert "Holding:" in frame.text
     assert "Carried by:" in frame.text
     assert "Next Yum" not in frame.text
+
+
+def test_format_dashboard_includes_collect_goal() -> None:
+    from ohol_bot.protocol_client import OholProtocolClient
+
+    client = OholProtocolClient()
+    client.self_player_id = 5
+    observation = Observation(
+        tick=3,
+        self=PlayerState(
+            player_id=5,
+            tile=Tile(2, -1),
+            age=20.0,
+            food_store=17,
+            max_food_store=20,
+        ),
+        facts={
+            "movement_mode": "collect",
+            "collect_names": ("stone",),
+            "collect_target_name": "Stone",
+            "collect_target": {"x": 4, "y": 28},
+            "collect_reason": "move to Stone",
+        },
+    )
+
+    frame = format_dashboard(
+        client,
+        observation,
+        last_action=Action(ActionType.MOVE_TO, {"x": 4, "y": 28}),
+        tick=2,
+        mode="run-live",
+    )
+
+    assert "Goal: trying to collect Stone at (4, 28)" in frame.text
+    assert "Status: moving to (4, 28) (move to Stone)" in frame.text

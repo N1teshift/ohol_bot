@@ -26,7 +26,7 @@ Long-term vision (not all implemented):
 private server → persistent Python client → live world state → survival planner → (next) recipes / family
 ```
 
-**Milestone reached:** single bot can run a movement-first live loop, follow a leader via chat, and move smoothly through server-confirmed paths. Legacy survival behavior also **forages, picks up food, and eats** on the private server (`USE` → `SELF`). Obstacle-aware pathfinding routes around blockers, supports diagonal/batched paths, and manual terminal control lets you walk N tiles in a direction.
+**Milestone reached:** single bot can run a movement-first live loop, follow a leader via chat, and move smoothly through server-confirmed paths. Legacy survival behavior also **forages, picks up food, and eats** on the private server (`USE` → `SELF`). Obstacle-aware pathfinding routes around blockers, supports diagonal/dynamic batched paths, and manual terminal control lets you walk N tiles in a direction.
 
 **Architecture upgrade completed (safe incremental refactor):**
 
@@ -40,9 +40,10 @@ private server → persistent Python client → live world state → survival pl
 - `run-live` and `play` now use the movement-first idle/follow policy by default.
 - Incoming `PS` chat is parsed into command events; `follow` starts following the speaker and `stop follow` / `idle` returns to idle.
 - Recipe/survival behavior is parked as legacy scaffolding instead of driving the live runtime.
-- Movement now sends short batched MOVE paths (up to 6 offsets), uses diagonal straight-line prefixes, and considers horizontal object `leftBlockingRadius` / `rightBlockingRadius` collision footprints.
+- Movement now sends dynamic batched MOVE paths (short/cautious in follow or dense terrain, longer in open straight paths), uses diagonal straight-line prefixes, and considers horizontal object `leftBlockingRadius` / `rightBlockingRadius` collision footprints.
+- The dashboard includes a compact local tile map plus path diagnostics. Follow target selection scores adjacent leader tiles by known reachability/path cost instead of geometry alone.
 
-Remaining work is smoother trail/formation movement, long-run hunger handling, crafting/recipes, and multi-bot coordination.
+Remaining work is smoother trail/formation movement in very dense terrain, long-run hunger handling, crafting/recipes, and multi-bot coordination.
 
 **Explicit scope choice:** one live bot first; multi-bot and recipe chains are deferred.
 
@@ -82,7 +83,7 @@ Decision layer:
         ↓
 SkillLibrary + typed planner facts adapter (skills.py, planner_facts.py; survival path)
         ↓
-movement.py — BFS pathfinding, batched paths, diagonal prefixes, approach tiles, corner-cutting (blocksWalking)
+movement.py — BFS pathfinding, dynamic batched paths, diagnostics, diagonal prefixes, approach tiles, corner-cutting (blocksWalking)
         ↓
 LiveSessionEngine (runner.py) — frame/tick pacing, observe/decide/act loop, stop reasons
         ↓
@@ -126,8 +127,9 @@ ohol_bot/
 │   ├── world_feedback.py        # Action feedback state (blocked/avoid/eat pending/force)
 │   ├── spatial_memory.py        # Working (radius 24) + long-term map memory (absolute tiles)
 │   ├── resource_memory.py       # Branch/tree landmark names + collect matching helpers
-│   ├── movement.py              # BFS pathfinding + batched diagonal paths + wide-collision footprint checks
+│   ├── movement.py              # BFS pathfinding + dynamic diagonal paths + diagnostics + wide-collision footprint checks
 │   ├── movement_policy.py       # Idle/follow policy driven by in-game chat
+│   ├── map_debug.py             # Compact ASCII local tile map for movement debugging
 │   ├── game_data.py             # objects/ transitions from sandbox
 │   ├── planner.py               # SurvivalPlanner orchestrating behavior modules
 │   ├── behaviors.py             # Behavior layer (SurvivalBehavior + RecipeBehavior scaffold)
@@ -260,7 +262,7 @@ Notes:
 - **`--max-ticks N`**: ends the session after N movement ticks via graceful `close()` — not a server crash.
 - **`--frame-paced`**: one movement decision per server **`FM`** frame (recommended for speed; ignores `--tick-seconds`).
 - **`--tick-seconds`**: wall-clock polling interval when not using `--frame-paced` (default `1.0`; each action also waits again after send).
-- **`--watch`**: terminal dashboard (position, goal, last chat, action status, leader/follow target, blocked/avoid counts).
+- **`--watch`**: terminal dashboard (position, goal, last chat, action status, leader/follow target, blocked/avoid counts, path diagnostics, local tile map).
 - **`--game-data-root`**: defaults to `.ohol_runtime/server` for object names, `foodValue`, and `blocksWalking` pathfinding.
 
 ### Movement follow policy (live default)
@@ -271,13 +273,14 @@ Notes:
 - **Follow trigger:** another player's `PS` chat `follow` (case-insensitive); `stop follow`, `stop following`, or `idle` returns to idle.
 - **Distance metric:** Chebyshev / square distance `max(|dx|, |dy|)` for leader distance, follow target validity, nearby-player visibility, and dashboard player distance.
 - **Close enough:** if leader distance <= 1 (same tile or adjacent), `WAIT` with `follow_reason = "close enough to leader"`.
-- **Catch-up:** only when leader distance >= 2, pick a walkable tile exactly one Chebyshev step from the leader, preferring non-`blocked_tiles`; `avoid_targets` are a soft penalty instead of a hard exclusion.
+- **Catch-up:** only when leader distance >= 2, score walkable tiles exactly one Chebyshev step from the leader by known reachability/path cost, preferring reachable non-`blocked_tiles`; `avoid_targets` are a soft penalty instead of a hard exclusion.
 - **Retarget cooldown:** reuse a current follow target for a few ticks while it remains valid.
 
-Path execution (`protocol_client._resolve_move_path`, `movement.walkable_path`):
+Path execution (`protocol_client._resolve_move_path`, `movement.walkable_path_with_diagnostics`):
 
 - Diagonal straight-line prefix when clear; otherwise 8-way BFS.
-- Up to 6 relative offsets per `MOVE` message, cardinal or diagonal.
+- Dynamic relative offsets per `MOVE` message: usually up to 6, shortened to 2 in follow/dense/recently blocked situations, and up to 10 on clear straight or diagonal open paths.
+- Each path stores diagnostics in `observation.facts["last_path_diagnostics"]`: start/target/effective target, path length, method (`straight` or `bfs`), search radius, and failure reason when no route is found.
 - Still one policy action per stationary frame; movement gating remains unchanged.
 
 Wide collision (`movement.blocking_footprint_tiles`) uses the object origin plus horizontal `leftBlockingRadius` / `rightBlockingRadius`; vertical neighbors are not blocked by radius alone.
@@ -341,7 +344,7 @@ Implementation: `build_login_message()` in `protocol_client.py`.
 | Intent | Message format |
 |--------|----------------|
 | Say | `SAY 0 0 text#` |
-| Move | `MOVE start_x start_y @seq dx1 dy1 [dx2 dy2 ...]#` — bot may send up to 6 relative offsets per message when the path is clear; `_resolve_move_path()` uses `walkable_path()` when game data is loaded |
+| Move | `MOVE start_x start_y @seq dx1 dy1 [dx2 dy2 ...]#` — bot sends dynamic relative offsets per message; `_resolve_move_path()` uses `walkable_path_with_diagnostics()` when game data is loaded |
 | Force | `FORCE x y#` |
 | Use / pick up (ground) | `USE target_x target_y#` |
 | Eat held food | `SELF x y -1#` (`ActionType.USE_SELF`) |
@@ -360,9 +363,9 @@ Implementation: `serialize_action()` in `protocol_client.py`.
 
 **Self player id:** locked in `OholProtocolClient` from the **first solo PU** after login, or the **first PM** after the bot sends a MOVE. Do **not** use **LN** (lineage) — each LN line describes a different player’s ancestry; the last line is often a nearby player, not self. Wrong self id breaks hunger, held state, and dashboard player id.
 
-**Action tile (`_action_tile`):** coordinates sent in MOVE/SELF must match the server’s idea of where the player is. Updated on confirmed PU/PM — not optimistically advanced on MOVE send.
+**Action tile (`_action_tile`):** coordinates sent in MOVE/SELF must match the server’s idea of where the player is. Updated on confirmed PU/PM — not optimistically advanced on MOVE send. While a move is in flight, stale self `PU` positions without `done_moving_seq` are ignored so the dashboard and `_action_tile` do not snap backward after a `PM`.
 
-**Birth-relative coordinates:** map objects from MC/MX use **absolute** world coords; MOVE/PU use coords **relative to spawn**. `WorldState.birth_tile` converts between them so pathfinding and nearby-object distance checks stay correct when spawning far from origin.
+**Birth-relative coordinates:** map objects from MC/MX use **absolute** world coords; MOVE/PU/PM use coords **relative to spawn**. `WorldState.birth_tile` converts between them so pathfinding and nearby-object distance checks stay correct when spawning far from origin. For batched `PM`, the parser keeps both start and final coordinates; `birth_tile` is anchored from the PM start coordinate so the local map does not drift by the first batch offset.
 
 **Move sequence:** PU field 12 is `done_moving_seq` (sequence number, not a boolean). `WorldState.move_in_flight()` blocks new MOVEs until the server confirms the step. After server **FORCE** (invalid path), bot waits for next **FM** before sending again (`_awaiting_force_ack`).
 
@@ -443,6 +446,8 @@ Single **Self** panel (no separate “inventory” view). Key lines:
 | `Held food: yes/no` | Whether planner will try `USE_SELF` |
 | `Carried by: …` | Adult player id if being carried, else `nobody` |
 | `Planner / Reason` | Last action and human-readable explanation |
+| `Last path: …` | Path method, batch length, and reason/failure reason from the last planned move |
+| `Local Tile Map` | ASCII map around the bot (`B`, `L`, `T`, `#`, `!`, `*`, `f`, `o`, `p`) for dense-terrain debugging |
 
 If `Held` flips from pie → `nothing` while the in-game sprite still holds food, that was a **stale PU with `o_id=0`** — fixed by held-item latching (see section 12).
 
@@ -459,6 +464,9 @@ If `Held` flips from pie → `nothing` while the in-game sprite still holds food
 - **Legacy planner loop:** forage / explore / return home / collect branches remains available for scenarios/future autonomy
 - **Frame-paced loop (`--frame-paced`):** `wait_for_frame()` → decide → act once per server step; no double wall-clock sleep
 - **Movement gating + batched MOVE paths:** verified live; pathfinding routes around `blocksWalking` trees and can send short cardinal/diagonal paths
+- **Local movement map diagnostics:** dashboard renders a compact tile map around the bot and labels path, leader, target, blockers, avoid targets, food, objects, and players
+- **Reachability-aware follow target selection:** adjacent leader tiles are scored by known path reachability before choosing a formation target
+- **Dynamic movement batching:** cautious short batches for follow/dense terrain; longer open straight/diagonal batches when clear
 - **Stuck-on-tree fixes:** avoid/blocked tiles, rotating explore, adjacent pickup, FORCE ack gating, birth-tile coords
 - **`scripts/verify_bot_run.py`:** automated stuck detection (unchanged tile, spam target, invalid paths)
 - **Manual control (`control` CLI):** walk N tiles in a direction from terminal REPL
@@ -484,7 +492,7 @@ If `Held` flips from pie → `nothing` while the in-game sprite still holds food
 |-----|-------|
 | Recipe / craft planner | No transition chains (sharp stone, fire, etc.) |
 | Wide collision | Horizontal `leftBlockingRadius` / `rightBlockingRadius` v1 done; full server parity for unusual sprites not proven |
-| Pathfinding polish | BFS + `blocksWalking`, diagonal prefixes, and batched MOVE (<= 6 offsets) done; no deadly tiles, distance limits, or terrain/object movement costs |
+| Pathfinding polish | BFS + `blocksWalking`, diagonal prefixes, diagnostics, dynamic batching, and horizontal wide collision done; no deadly tiles, terrain/object movement costs, or full collision parity for unusual sprites |
 | Mother-specific carry | Waits when **any** adult carries the bot, not only `mother_id` |
 | `action-probe` | Does not always login before sending actions |
 | Multi-bot live | `family.py` is skeleton only; user deferred second bot |
@@ -515,6 +523,8 @@ If `Held` flips from pie → `nothing` while the in-game sprite still holds food
 | Bot stuck mid-move (frame-paced) | New `MOVE` every `FM` while still walking | `action_blocker` + wait until stationary; one movement decision per stationary frame |
 | Bot stuck on tree / ping-pong | Explore always north; food in `avoid_targets` blocked pickup | Rotating explore, skip previous tile, adjacent pickup, pathfinding + avoid list |
 | Invalid path + MOVE spam | FORCE + MOVE same tick; wrong coords | Await FORCE ack on FM; birth-relative coords; corner-cutting |
+| Dashboard/map bot marker offset by first batched move | `birth_tile` was derived from batched PM final tile against the old relative start tile | Parse PM start coords and anchor `birth_tile` from PM start, then use PM final only as movement destination |
+| Bot/map briefly moved forward then snapped back | Stale self PU without `done_moving_seq` overwrote newer PM movement progress | Ignore stale self PU positions while move is in flight; only sync confirmed/forced PU or PM progress |
 | Default `--tick-seconds 1` feels slow | Double `poll_until` (~2s per action) | Use `--frame-paced` for server-step speed |
 
 ---
@@ -540,6 +550,9 @@ If `Held` flips from pie → `nothing` while the in-game sprite still holds food
 | **`--frame-paced` loop** | **Done** |
 | Movement gating + batched paths | Done |
 | Obstacle-aware pathfinding (basic BFS) | Done |
+| Local tile map + path diagnostics | Done |
+| Reachability-aware follow targets | Done |
+| Dynamic MOVE batch sizing | Done |
 | Stuck avoidance + verify_bot_run.py | Done |
 | Manual terminal control | Done |
 | Terminal dashboard | Done |
@@ -548,7 +561,7 @@ If `Held` flips from pie → `nothing` while the in-game sprite still holds food
 | Curriculum scenarios | Scaffold |
 | Multi-agent family coordinator | Skeleton only |
 | **Recipe / transition planner** | **In progress** — RecipeBehavior v1 gather + transition input lookup implemented; multi-step chains not implemented |
-| Wide collision / pathfinding polish | Partial (BFS + blocksWalking + horizontal wide collision + batched diagonal paths) |
+| Wide collision / pathfinding polish | Partial (BFS + blocksWalking + horizontal wide collision + dynamic batched diagonal paths + diagnostics) |
 | Second live bot + coordination | Deferred |
 
 ---
@@ -563,7 +576,7 @@ Next: multi-step chain search over transitions (goal -> prerequisite outputs -> 
 
 ### 2. Pathfinding polish
 
-Deadly tiles, low-clearance cautious batching, terrain/object movement costs, and longer plannerbot-style batches (plannerbot sends up to 10). Reference plannerbot for ideas; see [reuse_decision.md](reuse_decision.md).
+Deadly tiles, terrain/object movement costs, tighter forest heuristics, and full server collision parity for unusual sprites. Longer clear-path batches already support up to 10 steps. Reference plannerbot for ideas; see [reuse_decision.md](reuse_decision.md).
 
 ### 3. Richer carry / family logic
 
@@ -600,6 +613,7 @@ Decision: stay native Python. See [reuse_decision.md](reuse_decision.md).
 | Live session / keep-alive | `protocol_client.py`, `cli.py` (`run-live`, `stay-alive`) |
 | Manual terminal control | `manual_control.py`, `cli.py` (`control`) |
 | Pathfinding | `movement.py`, `protocol_client._resolve_move_path()` |
+| Local map diagnostics | `map_debug.py`, `dashboard.py`, `WorldState.to_observation()` |
 | Follow / idle policy | `movement_policy.py` |
 | Follow smoke test | `scripts/verify_follow_mode.py` |
 | Stuck detection smoke test | `scripts/verify_bot_run.py` |
@@ -651,4 +665,4 @@ python -m ohol_bot.cli run-scenario scenarios\find_food.json
 
 ---
 
-*Last updated: June 2026 — movement-first follow mode, adjacent follow formation, batched diagonal MOVE paths, horizontal wide collision, Chebyshev player distances, manual `control` CLI, `verify_bot_run.py`; birth-tile coords; FORCE ack gating.*
+*Last updated: June 2026 — movement-first follow mode, adjacent follow formation, reachability-aware follow targets, local tile map diagnostics, dynamic batched diagonal MOVE paths, horizontal wide collision, Chebyshev player distances, manual `control` CLI, `verify_bot_run.py`; birth-tile/PM coordinate fixes; FORCE ack gating.*
