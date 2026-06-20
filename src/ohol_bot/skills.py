@@ -10,6 +10,7 @@ from .hunger import eat_blocker
 from .planner_facts import PlannerFacts, planner_facts
 
 from .model import Action, ActionType, Observation, ObjectState, Tile
+from .home import home_area_radius, is_at_home
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +139,7 @@ class SkillLibrary:
 
 
 
-    def return_home(self, observation: Observation, max_distance: int = 12) -> SkillResult | None:
+    def return_home(self, observation: Observation, max_distance: int | None = None) -> SkillResult | None:
 
         if observation.home is None:
 
@@ -146,7 +147,9 @@ class SkillLibrary:
 
         player = observation.self
 
-        if player.tile.distance_to(observation.home) <= max_distance:
+        radius = max_distance if max_distance is not None else home_area_radius(observation)
+
+        if is_at_home(observation, player.tile, radius=radius):
 
             return None
 

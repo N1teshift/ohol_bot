@@ -140,7 +140,15 @@ class CravingMessage(ProtocolMessage):
 
 
 @dataclass(frozen=True, slots=True)
+class LineageEntry:
+    player_id: int
+    ancestor_ids: tuple[int, ...] = ()
+    lineage_eve_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class LineageMessage(ProtocolMessage):
+    entries: tuple[LineageEntry, ...] = ()
     player_id: int | None = None
 
 
@@ -381,12 +389,38 @@ def _parse_craving(raw: str) -> CravingMessage:
 
 
 def _parse_lineage(raw: str) -> LineageMessage:
-    player_id = None
+    entries: list[LineageEntry] = []
     for line in raw.splitlines()[1:]:
         fields = line.split()
-        if fields:
-            player_id = _safe_int(fields[0], player_id)
-    return LineageMessage(ProtocolMessageType.LINEAGE, raw, player_id=player_id)
+        if not fields:
+            continue
+        player_id = _safe_int(fields[0], None)
+        if player_id is None:
+            continue
+        lineage_eve_id: int | None = None
+        ancestor_tokens = fields[1:]
+        if ancestor_tokens and ancestor_tokens[-1].startswith("eve="):
+            lineage_eve_id = _safe_int(ancestor_tokens[-1].split("=", maxsplit=1)[1], None)
+            ancestor_tokens = ancestor_tokens[:-1]
+        ancestor_ids = tuple(
+            ancestor_id
+            for token in ancestor_tokens
+            if (ancestor_id := _safe_int(token, None)) is not None and ancestor_id != 0
+        )
+        entries.append(
+            LineageEntry(
+                player_id=player_id,
+                ancestor_ids=ancestor_ids,
+                lineage_eve_id=lineage_eve_id,
+            )
+        )
+    last_player_id = entries[-1].player_id if entries else None
+    return LineageMessage(
+        ProtocolMessageType.LINEAGE,
+        raw,
+        entries=tuple(entries),
+        player_id=last_player_id,
+    )
 
 
 def _parse_map_chunk(raw: str) -> MapChunkMessage:

@@ -28,9 +28,19 @@ python -m ohol_bot.cli run-live --forever --frame-paced --planner-hz 6 --watch
 ```
 
 Say `follow` in game from the player you want the bot to follow. Say `stop follow`
-to return the bot to idle. Say `collect stack stone` or `collect stack limestone`
-to run the stack helper (gather loose items and piles to a depot beside the speaker;
-default deposit count 6).
+or `idle` to return the bot to idle. Other chat commands:
+
+| Command | Effect |
+|---------|--------|
+| `collect <item>` | Pick up nearest matching object |
+| `collect stack <item>` | Gather loose items + piles to a depot beside the speaker (default 6) |
+| `make sharp stone` | Pick up Stone, USE on Big Hard Rock |
+| `set home here` | Snap home to nearest well/spring; record camp depot grid |
+| `stock camp` | Fill 8 camp slots around the fire (nearest source first) |
+
+After **`set home here`**, the bot records a **camp layout**: fire tile **8 tiles north**
+of the well, with **8 numbered depot slots** (NW=1, clockwise). **`stock camp`**
+gathers for all incomplete slots at once, always taking the nearest visible item.
 
 While following, the bot waits on the same tile as the leader or any adjacent
 tile (Chebyshev distance <= 1). It only moves when the leader is 2+ tiles away,
@@ -91,7 +101,10 @@ One-shot: `python -m ohol_bot.cli control move 10 east`. Add `--watch` for the d
 - **World state** from PU, PM, FX, MC, MX (position, hunger, map objects, players)
 - **World/action state split started**: `WorldState` (packet-derived) + `ActionFeedbackState` (move/eat/force feedback)
 - **Movement follow policy** live: idle by default, follow the player who says `follow`, return to idle on `stop follow`; wait at distance <= 1, move at distance >= 2
-- **Collect / stack chat modes:** `collect <item>` and `collect stack <item>` gather objects to a depot; stack mode uses `game_data.build_stack_collect_catalog()`, skips danger tiles, and reuses the same source briefly for smoother paths
+- **Collect / stack / camp chat modes:** `collect <item>`, `collect stack <item>`, **`set home here`**, **`stock camp`**, **`make sharp stone`** — see table above; stack/camp modes use `game_data.build_stack_collect_catalog()` + camp rules, skip danger tiles
+- **Home + camp depot:** `home.py` snaps home to well/spring; `camp_depot.py` defines fire + 8 slot grid on `set home here`
+- **Lineage / relationships:** LN packets → genetic relation labels on dashboard (`your sister`, etc.)
+- **Working memory on dashboard:** top object types in 24-tile radius
 - **Structured chat parsing** for `PS` command events
 - **Typed planner-facts adapter** (`planner_facts.py`) used by skills for danger/blocked/remembered targets
 - **Behavior-layer scaffold** (`behaviors.py`): `SurvivalBehavior` active, `RecipeBehavior` skeleton for next feature
@@ -104,12 +117,12 @@ One-shot: `python -m ohol_bot.cli control move 10 east`. Add `--watch` for the d
 - **Movement pacing**: one policy decision per planner tick; non-`WAIT` actions only send when stationary; each `MOVE` may encode a dynamic batched path (2 in follow or near danger/blockers; up to 6 default; up to 10 in open straight `collect` / `collect_stack` paths)
 - **Self player detection**: locked from first solo PU or first PM after our MOVE — **not** from LN
 - **Action coordinates**: `_action_tile` + `birth_tile` offset for map (absolute) vs MOVE/PU/PM (relative) coords; batched PM start coords anchor the birth offset
-- **Movement dashboard** (`--watch`): goal, last chat, action status, planner/world/server/KA counters with **(+N/5s)** rates, follow/collect target, blocked/danger counts, danger nearby preview, path diagnostics, and a compact local tile map (`#` blocked, `!` danger)
+- **Movement dashboard** (`--watch`): goal, last chat, action status, planner/world/server/KA counters with **(+N/5s)** rates, follow/collect/camp stock progress, home + camp fire, working memory, blocked/danger counts, danger nearby preview, path diagnostics, and a compact local tile map (`#` blocked, `!` danger, `F` fire, `1`–`8` camp slots)
 - **Manual control** (`control` CLI)
 - **`scripts/verify_bot_run.py`**: automated stuck detection after movement changes
 - Game data loader (~4400 objects, transitions) from `.ohol_runtime/server`
 - Mock scenarios and unit tests under `tests/`
-- Full regression suite currently passing: `211` tests
+- Full regression suite: `266` tests (run `python -m pytest`)
 
 ## Bot API
 
@@ -193,7 +206,11 @@ Separate credentials per bot copy avoid Steam single-session disconnects.
 | RecipeBehavior v1 (opt-in gather) | Done |
 | Transition-driven recipe input selection | Done |
 | Wide collision footprint checks | Done (horizontal v1) |
+| Chat-driven home + camp depot stocking | **Done** |
+| Make sharp stone (chat craft) | **Done** |
+| LN lineage + genetic relations on dashboard | **Done** |
 | Local movement map diagnostics | Done |
+| Full camp pile-height detection at start | Not started |
 | Recipe / transition planner (fire, tools) | Not started |
 | Multi-bot family coordinator | Skeleton only |
 

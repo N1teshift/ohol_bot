@@ -261,3 +261,77 @@ def test_format_dashboard_shows_per_five_second_rates() -> None:
     assert "world tick 10 (+20/5s)" in frame.text
     assert "server frames 10 (+20/5s)" in frame.text
     assert "KA pings 2 (+4/5s)" in frame.text
+
+
+def test_format_dashboard_shows_lineage_and_relations() -> None:
+    from ohol_bot.protocol_client import OholProtocolClient
+
+    client = OholProtocolClient()
+    client.self_player_id = 14
+    observation = Observation(
+        tick=1,
+        self=PlayerState(
+            player_id=14,
+            tile=Tile(0, 0),
+            age=20.0,
+            food_store=20,
+            max_food_store=20,
+            mother_id=13,
+            lineage_id=13,
+            race_name="Asian",
+        ),
+        nearby_players=(
+            PlayerState(
+                player_id=13,
+                tile=Tile(1, 0),
+                age=30.0,
+                food_store=20,
+                max_food_store=20,
+                relation_to_self="your mother",
+            ),
+        ),
+        facts={"world_state_ready": True, "movement_mode": "idle"},
+    )
+
+    frame = format_dashboard(client, observation, tick=1, mode="run-live")
+
+    assert "Lineage: Mother: 13 | Eve line: 13 | Race: Asian" in frame.text
+    assert "(your mother)" in frame.text
+
+
+def test_format_dashboard_shows_working_memory_summary() -> None:
+    from ohol_bot.protocol_client import OholProtocolClient
+
+    client = OholProtocolClient()
+    observation = Observation(
+        tick=1,
+        self=PlayerState(
+            player_id=5,
+            tile=Tile(0, 0),
+            age=20.0,
+            food_store=20,
+            max_food_store=20,
+        ),
+        nearby_objects=(
+            ObjectState(1, "Gooseberry Bush", Tile(2, 0), food_value=0),
+            ObjectState(1, "Gooseberry Bush", Tile(3, 0), food_value=0),
+            ObjectState(2, "Wild Berry Bush#dry", Tile(4, 0), food_value=0),
+            ObjectState(3, "Shallow Well", Tile(8, 0), food_value=0),
+        ),
+        facts={
+            "world_state_ready": True,
+            "movement_mode": "idle",
+            "working_memory_count": 4,
+            "long_term_memory_count": 17,
+        },
+    )
+
+    frame = format_dashboard(client, observation, tick=1, mode="run-live")
+
+    assert "Working memory (short)" in frame.text
+    assert "Objects in working memory: 4 (radius 24, 3 types)" in frame.text
+    assert "Long-term landmarks: 17" in frame.text
+    assert "Top types in working memory:" in frame.text
+    assert "Gooseberry Bush: 2" in frame.text
+    assert "Wild Berry Bush: 1" in frame.text
+    assert "Shallow Well: 1" in frame.text

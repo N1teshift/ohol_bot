@@ -2,12 +2,28 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 from .biomes import count_biomes_in_radius
 from .danger import dangerous_objects_preview, dangerous_tiles, danger_path_blockers
-from .game_data import OholGameData, build_stack_collect_catalog
+from .game_data import OholGameData, build_stack_collect_catalog, merge_camp_stack_catalog
+from .camp_depot import CampLayout, camp_layout_to_facts
+from .home import DEFAULT_HOME_AREA_RADIUS
 from .model import Action, ActionType, ObjectState, Observation, PlayerState, Tile, step_toward
 from .movement import blocking_footprint_tiles, next_walkable_step, walkable_path
+from .naming import (
+    DEFAULT_BABY_NAMING_PHRASES,
+    DEFAULT_FAMILY_NAMING_PHRASES,
+    PlayerIdentity,
+    apply_assigned_name_line,
+    apply_naming_from_speech,
+    enrich_player_with_identity,
+    identity_display_name,
+    load_naming_phrases,
+)
+from .lineage import PlayerLineage, apply_lineage_entries, enrich_player_with_lineage
+from .ohol_names import NameCatalog
+from .relationships import relation_name
 from .spatial_memory import SpatialMemory, WORKING_RADIUS, remembered_target_fact
 from .world_feedback import ActionFeedbackState
 from .protocol_messages import (
@@ -32,6 +48,9 @@ class WorldState:
     tick: int = 0
     self_player_id: int | None = None
     home_tile: Tile | None = None
+    home_radius: int = DEFAULT_HOME_AREA_RADIUS
+    home_center_name: str | None = None
+    camp_layout: CampLayout | None = None
     players: dict[int, PlayerState] = field(default_factory=dict)
     tile_objects: dict[Tile, int] = field(default_factory=dict)
     tile_biomes: dict[Tile, int] = field(default_factory=dict)
@@ -49,6 +68,13 @@ class WorldState:
     birth_tile: Tile | None = None
     chat_events: list[dict[str, object]] = field(default_factory=list)
     _chat_sequence: int = 0
+    player_identities: dict[int, PlayerIdentity] = field(default_factory=dict)
+    player_lineages: dict[int, PlayerLineage] = field(default_factory=dict)
+    eve_players: set[int] = field(default_factory=set)
+    _family_naming_phrases: tuple[str, ...] = DEFAULT_FAMILY_NAMING_PHRASES
+    _baby_naming_phrases: tuple[str, ...] = DEFAULT_BABY_NAMING_PHRASES
+    name_catalog: NameCatalog | None = None
+    game_data: OholGameData | None = None
     _prev_self_tile: Tile | None = None
     _danger_tiles: set[Tile] = field(default_factory=set)
     spatial_memory: SpatialMemory = field(default_factory=SpatialMemory)
@@ -226,7 +252,7 @@ class WorldState:
 
     def apply(self, message: ProtocolMessage) -> None:
         if isinstance(message, LineageMessage):
-            pass
+            apply_lineage_entries(self.player_lineages, message.entries)
         elif isinstance(message, PlayerUpdateMessage):
             for entry in message.players:
                 self._apply_player_update(entry)
@@ -304,6 +330,20 @@ class WorldState:
         if player is not None and self.home_tile is None:
             self.home_tile = player.tile
 
+    def configure_naming_phrases(self, game_data_root: Path | str | None) -> None:
+        root = Path(game_data_root) if game_data_root is not None else None
+        family, baby = load_naming_phrases(root)
+        self._family_naming_phrases = family
+        self._baby_naming_phrases = baby
+        self.name_catalog = NameCatalog.load(root)
+
+    def set_game_data(self, game_data: OholGameData | None) -> None:
+        self.game_data = game_data
+
+    def ingest_assigned_name_lines(self, lines: tuple[str, ...]) -> None:
+        for line in lines:
+            apply_assigned_name_line(line, self.player_identities, self.eve_players)
+
     def to_observation(
         self,
         game_data: OholGameData | None = None,
@@ -323,9 +363,16 @@ class WorldState:
                 facts={"world_state_ready": False, "tick": self.tick},
             )
 
-        self_player = self._enrich_self_player(
-            self.players[self.self_player_id],
-            game_data,
+        self_player = enrich_player_with_lineage(
+            enrich_player_with_identity(
+                self._enrich_self_player(
+                    self.players[self.self_player_id],
+                    game_data,
+                ),
+                self.player_identities,
+            ),
+            self.player_lineages,
+            game_data=game_data,
         )
         previous_tile = self._prev_self_tile
         self._prev_self_tile = self_player.tile
@@ -351,12 +398,22 @@ class WorldState:
             names=set(),
             collect_landmarks=True,
         )
-        nearby_players = tuple(
-            player
-            for player_id, player in self.players.items()
-            if player_id != self.self_player_id
-            and _chebyshev(self_player.tile, player.tile) <= radius
-        )
+        nearby_players_list: list[PlayerState] = []
+        for player_id, player in self.players.items():
+            if player_id == self.self_player_id:
+                continue
+            if _chebyshev(self_player.tile, player.tile) > radius:
+                continue
+            other = enrich_player_with_lineage(
+                enrich_player_with_identity(player, self.player_identities),
+                self.player_lineages,
+                game_data=game_data,
+            )
+            rel = relation_name(self_player, other, game_data=game_data)
+            if rel is not None:
+                other = replace(other, relation_to_self=rel)
+            nearby_players_list.append(other)
+        nearby_players = tuple(nearby_players_list)
         self_biome_id = self.tile_biomes.get(self.to_absolute(self_player.tile))
         self_floor_id = self.tile_floors.get(self.to_absolute(self_player.tile))
         nearby_biome_counts = count_biomes_in_radius(
@@ -369,7 +426,15 @@ class WorldState:
         )
         known_blocking_tiles = self._known_blocking_tiles(game_data)
         known_blocking_objects = self._known_blocking_objects(game_data)
-        stack_collect_catalog = build_stack_collect_catalog(game_data)
+        stack_collect_catalog = merge_camp_stack_catalog(
+            build_stack_collect_catalog(game_data),
+            game_data,
+        )
+        camp_layout_facts = (
+            camp_layout_to_facts(self.camp_layout)
+            if self.camp_layout is not None
+            else None
+        )
 
         return Observation(
             tick=self.tick,
@@ -377,6 +442,7 @@ class WorldState:
             nearby_objects=nearby_objects,
             nearby_players=nearby_players,
             home=self.home_tile,
+            home_radius=self.home_radius if self.home_tile is not None else None,
             self_biome_id=self_biome_id,
             self_floor_id=self_floor_id,
             facts={
@@ -418,6 +484,7 @@ class WorldState:
                 ),
                 "known_blocking_objects": known_blocking_objects,
                 "stack_collect_catalog": stack_collect_catalog,
+                "camp_layout": camp_layout_facts,
                 "last_move_path": tuple(
                     (tile.x, tile.y) for tile in self.feedback.last_move_path
                 ),
@@ -428,6 +495,22 @@ class WorldState:
                     else None
                 ),
                 "chat_events": tuple(self.chat_events[-20:]),
+                "player_names": {
+                    player_id: identity.display_name
+                    for player_id, identity in self.player_identities.items()
+                    if identity.display_name is not None
+                },
+                "self_display_name": self_player.display_name,
+                "self_mother_id": self_player.mother_id,
+                "self_lineage_eve_id": self_player.lineage_id,
+                "self_ancestor_ids": self_player.ancestor_ids,
+                "nearby_relations": {
+                    other.player_id: other.relation_to_self
+                    for other in nearby_players
+                    if other.relation_to_self is not None
+                },
+                "home_radius": self.home_radius if self.home_tile is not None else None,
+                "home_center_name": self.home_center_name,
                 "working_memory_count": memory_stats.working_count,
                 "long_term_memory_count": memory_stats.long_term_count,
                 "long_term_food_count": self.spatial_memory.long_term_food_count(),
@@ -493,13 +576,32 @@ class WorldState:
         if message.player_id is None or not message.text:
             return
         self._chat_sequence += 1
-        self.chat_events.append(
-            {
-                "sequence": self._chat_sequence,
-                "player_id": message.player_id,
-                "text": message.text,
-            }
+        naming = apply_naming_from_speech(
+            speaker_id=message.player_id,
+            text=message.text,
+            players=self.players,
+            identities=self.player_identities,
+            eve_players=self.eve_players,
+            family_phrases=self._family_naming_phrases,
+            baby_phrases=self._baby_naming_phrases,
+            catalog=self.name_catalog,
+            game_data=self.game_data,
         )
+        event: dict[str, object] = {
+            "sequence": self._chat_sequence,
+            "player_id": message.player_id,
+            "text": message.text,
+            "speaker_name": identity_display_name(
+                self.player_identities,
+                message.player_id,
+            ),
+        }
+        speaker = self.players.get(message.player_id)
+        if speaker is not None:
+            event["speaker_tile"] = {"x": speaker.tile.x, "y": speaker.tile.y}
+        if naming is not None:
+            event["naming"] = naming.as_fact()
+        self.chat_events.append(event)
         del self.chat_events[:-50]
 
     def _mark_self_moving(self) -> None:
@@ -579,6 +681,9 @@ class WorldState:
             age=age,
             food_store=food_store,
             max_food_store=max_food_store,
+            display_id=entry.display_id if entry.display_id is not None else (
+                existing.display_id if existing else None
+            ),
             held_object_id=self._resolve_held_object_id(entry, existing),
             held_baby_id=entry.held_baby_id,
             held_by_player_id=existing.held_by_player_id if existing else None,

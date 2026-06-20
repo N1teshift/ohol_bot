@@ -49,6 +49,44 @@ def test_parse_object_blocking_radii(tmp_path: Path) -> None:
     assert obj.right_blocking_radius == 1
 
 
+def test_parse_object_race(tmp_path: Path) -> None:
+    object_file = tmp_path / "12.txt"
+    object_file.write_text(
+        "\n".join(
+            [
+                "id=12",
+                "Test Body",
+                "male=0",
+                "race=2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    obj = parse_object_file(object_file)
+
+    assert obj.male is False
+    assert obj.race == 2
+
+
+def test_parse_object_home_marker(tmp_path: Path) -> None:
+    object_file = tmp_path / "13.txt"
+    object_file.write_text(
+        "\n".join(
+            [
+                "id=13",
+                "Home Marker",
+                "homeMarker=1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    obj = parse_object_file(object_file)
+
+    assert obj.home_marker is True
+
+
 def test_parse_transition_file(tmp_path: Path) -> None:
     transition_file = tmp_path / "1_2_LT.txt"
     transition_file.write_text("3 4 0 0.000000 0.000000 0 0 0 1 0 0\n", encoding="utf-8")

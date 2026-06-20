@@ -31,6 +31,12 @@ def render_observation_map(
     follow_target = _fact_tile(observation.facts.get("follow_target"))
     leader_tile = _fact_tile(observation.facts.get("follow_leader_tile"))
     collect_target = _fact_tile(observation.facts.get("collect_target"))
+    camp_slots = _camp_slot_tiles(observation.facts.get("camp_layout"))
+    camp_fire = _fact_tile(
+        observation.facts.get("camp_layout", {}).get("fire_tile")
+        if isinstance(observation.facts.get("camp_layout"), dict)
+        else None
+    )
 
     lines = []
     for y in range(center.y + radius, center.y - radius - 1, -1):
@@ -49,6 +55,8 @@ def render_observation_map(
                     follow_target=follow_target,
                     leader_tile=leader_tile,
                     collect_target=collect_target,
+                    camp_fire=camp_fire,
+                    camp_slots=camp_slots,
                 )
             )
         lines.append("".join(row))
@@ -58,7 +66,7 @@ def render_observation_map(
         blocked=blocked,
         max_labels=cfg.max_object_labels,
     )
-    legend = "B=bot L=leader T=target C=collect *=path #=blocker !=danger f=food o=object p=player"
+    legend = "B=bot L=leader T=target C=collect F=fire 1-8=camp *=path #=blocker !=danger f=food o=object p=player"
     if labels:
         return "\n".join([*lines, legend, *labels])
     return "\n".join([*lines, legend])
@@ -76,9 +84,17 @@ def _tile_glyph(
     follow_target: Tile | None,
     leader_tile: Tile | None,
     collect_target: Tile | None,
+    camp_fire: Tile | None = None,
+    camp_slots: dict[Tile, int] | None = None,
 ) -> str:
     if tile == observation.self.tile:
         return "B"
+    if camp_slots is not None:
+        slot_id = camp_slots.get(tile)
+        if slot_id is not None:
+            return str(slot_id)
+    if camp_fire is not None and tile == camp_fire:
+        return "F"
     if leader_tile is not None and tile == leader_tile:
         return "L"
     if follow_target is not None and tile == follow_target:
@@ -152,3 +168,22 @@ def _fact_tile(raw: Any) -> Tile | None:
         return Tile(int(x), int(y))
     except (TypeError, ValueError):
         return None
+
+
+def _camp_slot_tiles(raw: Any) -> dict[Tile, int]:
+    if not isinstance(raw, dict):
+        return {}
+    slots_raw = raw.get("slots")
+    if not isinstance(slots_raw, tuple):
+        return {}
+    mapping: dict[Tile, int] = {}
+    for entry in slots_raw:
+        if not isinstance(entry, dict):
+            continue
+        tile_raw = entry.get("tile")
+        slot_id = entry.get("slot_id")
+        tile = _fact_tile(tile_raw)
+        if tile is None or not isinstance(slot_id, int):
+            continue
+        mapping[tile] = slot_id
+    return mapping

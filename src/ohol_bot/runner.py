@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from .client import BotClient
-from .model import Action, ActionType
+from .camp_depot import build_camp_layout
+from .model import Action, ActionType, Observation, Tile
 from .movement import resolve_approach_tile
 from .policy import Policy
 from .protocol_client import OholProtocolClient
@@ -43,6 +44,48 @@ class EpisodeResult:
     events: tuple[dict[str, Any], ...] = ()
 
 
+def apply_policy_observation_effects(
+    client: BotClient,
+    observation: Observation,
+) -> None:
+    """Apply one-shot world mutations requested by the policy via observation facts."""
+    if not isinstance(client, OholProtocolClient):
+        return
+    raw = observation.facts.get("set_home_tile")
+    if not isinstance(raw, dict):
+        return
+    x = raw.get("x")
+    y = raw.get("y")
+    if not isinstance(x, int) or not isinstance(y, int):
+        return
+    tile = Tile(x, y)
+    client.world_state.home_tile = tile
+    observation.facts["home_tile"] = {"x": tile.x, "y": tile.y}
+    layout = build_camp_layout(tile)
+    client.world_state.camp_layout = layout
+    observation.facts["camp_layout"] = {
+        "home_tile": {"x": layout.home_tile.x, "y": layout.home_tile.y},
+        "fire_tile": {"x": layout.fire_tile.x, "y": layout.fire_tile.y},
+        "slots": tuple(
+            {
+                "slot_id": slot.slot_id,
+                "tile": {"x": slot.tile.x, "y": slot.tile.y},
+                "item_query": slot.item_query,
+                "desired_count": slot.desired_count,
+            }
+            for slot in layout.slots
+        ),
+    }
+    radius = observation.facts.get("set_home_radius")
+    if isinstance(radius, int) and radius > 0:
+        client.world_state.home_radius = radius
+        observation.facts["home_radius"] = radius
+    center_name = observation.facts.get("set_home_center_name")
+    if isinstance(center_name, str) and center_name:
+        client.world_state.home_center_name = center_name
+        observation.facts["home_center_name"] = center_name
+
+
 def run_episode(client: BotClient, policy: Policy, max_ticks: int) -> EpisodeResult:
     actions: list[Action] = []
     min_food_ratio = 1.0
@@ -59,6 +102,7 @@ def run_episode(client: BotClient, policy: Policy, max_ticks: int) -> EpisodeRes
             )
 
         action = policy.decide(observation)
+        apply_policy_observation_effects(client, observation)
         client.send(action)
         actions.append(action)
 
@@ -154,6 +198,7 @@ class LiveSessionEngine:
                 self.final_tile = observation.self.tile
 
                 action = self.policy.decide(observation)
+                apply_policy_observation_effects(self.client, observation)
                 self._render_dashboard(observation, action, tick=tick, mode=self.mode)
 
                 self.client.send(action)
@@ -553,6 +598,7 @@ def run_live_interactive_episode(
                 else:
                     if control_mode == "auto":
                         action = policy.decide(observation)
+                        apply_policy_observation_effects(client, observation)
                         client.send(action)
                         actions.append(action)
                         play_events.append(

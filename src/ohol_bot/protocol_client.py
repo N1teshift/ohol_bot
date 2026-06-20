@@ -192,6 +192,15 @@ class OholProtocolClient(OholProtocolProbe):
         if self.game_data is None and game_data_root is not None:
             self.game_data = load_game_data(game_data_root, include_transitions=True)
         self.world_state = WorldState()
+        if game_data_root is not None:
+            root = Path(game_data_root)
+            self.world_state.configure_naming_phrases(root)
+            self._names_log_path = _resolve_names_log_path(root)
+        else:
+            self._names_log_path = None
+        self._names_log_offset = 0
+        if self.game_data is not None:
+            self.world_state.set_game_data(self.game_data)
         self.self_player_id: int | None = None
         self.logged_in = False
         self.rejected = False
@@ -383,6 +392,18 @@ class OholProtocolClient(OholProtocolProbe):
             return
         if self.world_state.move_in_flight():
             return
+        if action.type is ActionType.SAY:
+            from .speech import fit_say_text
+
+            age = (
+                self._last_observation.self.age
+                if self._last_observation is not None
+                else 0.0
+            )
+            fitted = fit_say_text(str(action.payload.get("text", "")), age=age)
+            if fitted is None:
+                return
+            action = Action(ActionType.SAY, {"text": fitted})
         if action.type is ActionType.MOVE_TO:
             if not self._self_player_id_locked:
                 self._awaiting_move_self_confirm = True
@@ -412,6 +433,7 @@ class OholProtocolClient(OholProtocolProbe):
     def observe(self) -> Observation:
         self._poll_once()
         self._poll_server_log_events()
+        self._poll_names_log_events()
         self._maybe_send_keep_alive()
         if self.self_player_id is not None:
             self.world_state.self_player_id = self.self_player_id
@@ -558,7 +580,7 @@ class OholProtocolClient(OholProtocolProbe):
                 self._awaiting_force_ack = False
             self.world_state.note_server_frame()
         elif isinstance(message, LineageMessage):
-            pass
+            self.world_state.apply(message)
         elif isinstance(message, (PlayerUpdateMessage, PlayerMovementMessage, PlayerSaysMessage, FoodChangeMessage, CravingMessage, MapChangeMessage, MapChunkMessage)):
             if isinstance(message, PlayerUpdateMessage):
                 self._maybe_lock_self_from_player_update(message)
@@ -653,6 +675,34 @@ class OholProtocolClient(OholProtocolProbe):
             event = _player_says_from_server_log_line(line)
             if event is not None:
                 self.world_state.apply(event)
+
+    def _poll_names_log_events(self) -> None:
+        if self._names_log_path is None or not self._names_log_path.exists():
+            return
+        try:
+            size = self._names_log_path.stat().st_size
+            if size < self._names_log_offset:
+                self._names_log_offset = 0
+            if size == self._names_log_offset:
+                return
+            with self._names_log_path.open("rb") as handle:
+                handle.seek(self._names_log_offset)
+                chunk = handle.read()
+            self._names_log_offset = size
+        except OSError:
+            return
+        text = chunk.decode("utf-8", errors="replace")
+        self.world_state.ingest_assigned_name_lines(tuple(text.splitlines()))
+
+
+def _resolve_names_log_path(server_root: Path) -> Path | None:
+    life_log = server_root / "lifeLog"
+    if not life_log.is_dir():
+        return None
+    files = list(life_log.glob("*_names.txt"))
+    if not files:
+        return None
+    return max(files, key=lambda path: path.stat().st_mtime)
 
 
 def _batch_has_frame(messages: tuple[ProtocolMessage, ...]) -> bool:
@@ -787,7 +837,9 @@ def _resolve_move_step(
 
 def serialize_action(action: Action, client: OholProtocolProbe | None = None) -> str:
     if action.type is ActionType.SAY:
-        return f"SAY 0 0 {action.payload['text']}#"
+        # OHOL server only accepts A-Z in speech; lowercase is stripped to spaces.
+        text = str(action.payload["text"]).upper()
+        return f"SAY 0 0 {text}#"
     if action.type is ActionType.MOVE_TO:
         start = client._action_tile if client is not None else Tile(
             action.payload.get("start_x", 0),

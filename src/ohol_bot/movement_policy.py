@@ -4,8 +4,12 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from .camp_depot import camp_layout_from_facts
 from .model import Action, ActionType, ObjectState, Observation, PlayerState, Tile
+from .danger import base_object_name
+from .home import DEFAULT_HOME_AREA_RADIUS, find_home_center_near
 from .policy import Policy
+from .speech import fit_say_from_candidates, fit_say_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +21,13 @@ class FollowConfig:
     collect_drop_settle_ticks: int = 3
     collect_stack_deposit_settle_ticks: int = 3
     stack_source_retarget_cooldown_ticks: int = 6
+
+
+_CHAT_REPLY_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "hello": ("HELLO", "HI", "H"),
+    "hi": ("HI", "H"),
+    "hey": ("HELLO", "HI", "H"),
+}
 
 
 @dataclass(slots=True)
@@ -33,8 +44,21 @@ class StackCollectState:
     source_target_ids: tuple[int, ...] = ()
     desired_count: int = 6
     deposited_count: int = 0
+    drop_only: bool = False
     pending_deposit_tile: Tile | None = None
     pending_deposit_sent_tick: int = -10_000
+
+
+@dataclass(slots=True)
+class CampSlotProgress:
+    slot_id: int
+    state: StackCollectState
+
+
+@dataclass(slots=True)
+class CampStockState:
+    requested_by: int
+    slots: tuple[CampSlotProgress, ...]
 
 
 class MovementFollowPolicy(Policy):
@@ -59,13 +83,27 @@ class MovementFollowPolicy(Policy):
         self.collect_stack: StackCollectState | None = None
         self._stack_source_tile: Tile | None = None
         self._stack_source_set_tick = -10_000
+        self.make_sharp_stone_requested_by: int | None = None
+        self.stock_camp_requested_by: int | None = None
+        self.camp_stock: CampStockState | None = None
+        self._pending_say: str | None = None
 
     def decide(self, observation: Observation) -> Action:
         command_reason = self._consume_chat_commands(observation)
+        if self._pending_say is not None and observation.self.is_stationary:
+            text = fit_say_text(self._pending_say, age=observation.self.age)
+            self._pending_say = None
+            if text is not None:
+                self._annotate(observation, reason=f"chat reply: {text}")
+                return Action(ActionType.SAY, {"text": text})
         if self.mode == "collect_stack":
             return self._decide_collect_stack(observation, command_reason)
+        if self.mode == "stock_camp":
+            return self._decide_stock_camp(observation, command_reason)
         if self.mode == "collect":
             return self._decide_collect(observation, command_reason)
+        if self.mode == "make_sharp_stone":
+            return self._decide_make_sharp_stone(observation, command_reason)
 
         if self.mode != "follow" or self.leader_id is None:
             self._current_target = None
@@ -119,26 +157,89 @@ class MovementFollowPolicy(Policy):
             if player_id is None or player_id == observation.self.player_id:
                 continue
             if text == "follow":
+                self._reset_task_modes()
                 self.mode = "follow"
                 self.leader_id = player_id
                 self._current_target = None
-                self._clear_collect()
                 reason = f"follow command from player {player_id}"
-            elif text in {"stop follow", "stop following", "stop collect", "idle"}:
-                if self.leader_id is None or self.leader_id == player_id:
+            elif text in {
+                "stop follow",
+                "stop following",
+                "stop collect",
+                "stop make sharp stone",
+                "stop make",
+                "idle",
+            }:
+                if (
+                    self.leader_id is None
+                    or self.leader_id == player_id
+                    or self.make_sharp_stone_requested_by == player_id
+                    or self.collect_requested_by == player_id
+                    or self.stock_camp_requested_by == player_id
+                ):
                     self.mode = "idle"
                     self.leader_id = None
                     self._current_target = None
                     self._clear_collect()
                     reason = f"stop command from player {player_id}"
+            elif text == "stock camp":
+                layout = camp_layout_from_facts(observation.facts.get("camp_layout"))
+                if layout is None and observation.home is not None:
+                    from .camp_depot import build_camp_layout
+
+                    layout = build_camp_layout(observation.home)
+                if layout is None:
+                    reason = f"stock camp rejected: home not set (player {player_id})"
+                else:
+                    self._reset_task_modes()
+                    self.mode = "stock_camp"
+                    self.stock_camp_requested_by = player_id
+                    self.camp_stock = _camp_stock_state_from_layout(
+                        observation,
+                        layout,
+                        requested_by=player_id,
+                    )
+                    reason = f"stock camp from player {player_id}"
+            elif text == "make sharp stone":
+                self._reset_task_modes()
+                self.mode = "make_sharp_stone"
+                self.make_sharp_stone_requested_by = player_id
+                reason = f"make sharp stone from player {player_id}"
+            elif text == "set home here":
+                speaker_tile = _speaker_tile(observation, player_id)
+                if speaker_tile is not None:
+                    center = find_home_center_near(observation, speaker_tile)
+                    if center is not None:
+                        home_tile = center.tile
+                        center_name = base_object_name(center.name)
+                        observation.facts["set_home_tile"] = {
+                            "x": home_tile.x,
+                            "y": home_tile.y,
+                        }
+                        observation.facts["set_home_radius"] = DEFAULT_HOME_AREA_RADIUS
+                        observation.facts["set_home_center_name"] = center_name
+                        reason = (
+                            f"set home at {center_name} ({home_tile.x}, {home_tile.y}) "
+                            f"from player {player_id}"
+                        )
+                    else:
+                        observation.facts["set_home_tile"] = {
+                            "x": speaker_tile.x,
+                            "y": speaker_tile.y,
+                        }
+                        observation.facts["set_home_radius"] = DEFAULT_HOME_AREA_RADIUS
+                        reason = (
+                            f"set home from player {player_id} at "
+                            f"({speaker_tile.x}, {speaker_tile.y}); no well/spring nearby"
+                        )
+            elif (reply := _chat_reply(text, observation.self.age)) is not None:
+                self._pending_say = reply
+                reason = f"chat greeting from player {player_id}"
             else:
                 stack_item = _parse_collect_stack_command(text)
                 if stack_item is not None:
+                    self._reset_task_modes()
                     self.mode = "collect_stack"
-                    self.leader_id = None
-                    self._current_target = None
-                    self._clear_collect_pickup()
-                    self._clear_collect_drop()
                     speaker = _player_by_id(observation, player_id)
                     depot_origin = speaker.tile if speaker is not None else None
                     stack_rule = _resolve_stack_rule(observation, stack_item)
@@ -161,9 +262,8 @@ class MovementFollowPolicy(Policy):
                     continue
                 collect_name = _parse_collect_command(text)
                 if collect_name is not None:
+                    self._reset_task_modes()
                     self.mode = "collect"
-                    self.leader_id = None
-                    self._current_target = None
                     self._clear_collect_pickup()
                     self.collect_requested_by = player_id
                     self.collect_names = frozenset({collect_name})
@@ -242,41 +342,24 @@ class MovementFollowPolicy(Policy):
                     return Action(ActionType.MOVE_TO, {"x": depot.x, "y": depot.y})
 
                 depot_object = _object_at_tile(observation, depot)
-                if depot_object is None:
-                    self._note_stack_deposit_attempt(observation, state, depot)
-                    reason = f"start {state.item_name} stack {state.deposited_count + 1}/{state.desired_count}"
+                deposit_action, deposit_reason = _decide_stack_deposit_action(
+                    observation,
+                    state,
+                    depot,
+                    depot_object,
+                    self,
+                )
+                if deposit_action is not None:
                     self._annotate(
                         observation,
                         collect_target=depot,
-                        reason=reason,
-                        collect_reason=reason,
+                        reason=deposit_reason,
+                        collect_reason=deposit_reason,
                         collect_target_name=state.item_name,
                     )
-                    return Action(ActionType.DROP, {"x": depot.x, "y": depot.y})
+                    return deposit_action
 
-                if _is_stack_depot_object(depot_object, state):
-                    self._note_stack_deposit_attempt(observation, state, depot)
-                    reason = (
-                        f"add {state.item_name} to stack "
-                        f"{state.deposited_count + 1}/{state.desired_count}"
-                    )
-                    self._annotate(
-                        observation,
-                        collect_target=depot,
-                        reason=reason,
-                        collect_reason=reason,
-                        collect_target_name=state.item_name,
-                    )
-                    return Action(
-                        ActionType.USE,
-                        {
-                            "target_x": depot.x,
-                            "target_y": depot.y,
-                            "expect_empty_hands": True,
-                        },
-                    )
-
-                reason = f"stack depot blocked by {depot_object.name}"
+                reason = f"stack depot blocked by {depot_object.name if depot_object else 'unknown'}"
                 self._annotate(
                     observation,
                     collect_target=depot,
@@ -338,6 +421,186 @@ class MovementFollowPolicy(Policy):
                 return pickup_action
 
         reason = command_reason or f"move to {target.name} for stack"
+        self._annotate(
+            observation,
+            collect_target=target.tile,
+            reason=reason,
+            collect_reason=reason,
+            collect_target_name=target.name,
+        )
+        return Action(ActionType.MOVE_TO, {"x": target.tile.x, "y": target.tile.y})
+
+    def _decide_stock_camp(
+        self,
+        observation: Observation,
+        command_reason: str | None,
+    ) -> Action:
+        camp = self.camp_stock
+        if camp is None:
+            self.mode = "idle"
+            self._annotate(
+                observation,
+                reason="stock camp missing state",
+                collect_reason="stock camp missing state",
+            )
+            return Action(ActionType.WAIT, {"ticks": 1})
+
+        for slot in camp.slots:
+            completed = self._maybe_note_stack_deposit_complete(
+                observation,
+                slot.state,
+            )
+            if completed:
+                self._clear_collect_pickup()
+                self._clear_collect_drop()
+
+        if _camp_stock_complete(camp):
+            reason = "stock camp complete"
+            self.mode = "idle"
+            self._annotate(
+                observation,
+                reason=reason,
+                collect_reason=reason,
+            )
+            return Action(ActionType.WAIT, {"ticks": 1})
+
+        if observation.self.held_pending:
+            reason = "stock camp pickup pending"
+            self._annotate(
+                observation,
+                reason=reason,
+                collect_reason=reason,
+            )
+            return Action(ActionType.WAIT, {"ticks": 1})
+
+        settle_reason = _camp_stock_deposit_settle_reason(self, observation, camp)
+        if settle_reason is not None:
+            self._annotate(
+                observation,
+                reason=settle_reason,
+                collect_reason=settle_reason,
+            )
+            return Action(ActionType.WAIT, {"ticks": 1})
+
+        if observation.self.held_object_id is not None or observation.self.is_holding_food:
+            active_slot = _camp_slot_for_held_item(observation, camp)
+            if active_slot is not None:
+                depot = active_slot.state.depot_tile
+                if depot is None:
+                    reason = "stock camp depot unavailable"
+                    self._annotate(
+                        observation,
+                        reason=reason,
+                        collect_reason=reason,
+                    )
+                    return Action(ActionType.WAIT, {"ticks": 1})
+                if not _is_adjacent_or_same(observation.self.tile, depot):
+                    reason = (
+                        f"return to camp slot {active_slot.slot_id} "
+                        f"with {active_slot.state.item_name}"
+                    )
+                    self._annotate(
+                        observation,
+                        collect_target=depot,
+                        reason=reason,
+                        collect_reason=reason,
+                        collect_target_name=active_slot.state.item_name,
+                    )
+                    return Action(ActionType.MOVE_TO, {"x": depot.x, "y": depot.y})
+
+                depot_object = _object_at_tile(observation, depot)
+                deposit_action, deposit_reason = _decide_stack_deposit_action(
+                    observation,
+                    active_slot.state,
+                    depot,
+                    depot_object,
+                    self,
+                    slot_id=active_slot.slot_id,
+                )
+                if deposit_action is not None:
+                    self._annotate(
+                        observation,
+                        collect_target=depot,
+                        reason=deposit_reason,
+                        collect_reason=deposit_reason,
+                        collect_target_name=active_slot.state.item_name,
+                    )
+                    return deposit_action
+
+                reason = (
+                    f"camp slot {active_slot.slot_id} blocked by "
+                    f"{depot_object.name if depot_object else 'unknown'}"
+                )
+                self._annotate(
+                    observation,
+                    collect_target=depot,
+                    reason=reason,
+                    collect_reason=reason,
+                    collect_target_name=active_slot.state.item_name,
+                )
+                return Action(ActionType.WAIT, {"ticks": 1})
+
+            drop_tile = _select_drop_tile(observation)
+            if drop_tile is None:
+                reason = (
+                    f"stock camp cannot drop held "
+                    f"{observation.self.held_object_name or 'object'}"
+                )
+                self._annotate(
+                    observation,
+                    reason=reason,
+                    collect_reason=reason,
+                )
+                return Action(ActionType.WAIT, {"ticks": 1})
+            self._note_collect_drop_attempt(observation, drop_tile)
+            held_name = observation.self.held_object_name or "object"
+            reason = f"drop held {held_name} before stock camp"
+            self._annotate(
+                observation,
+                reason=reason,
+                collect_reason=reason,
+            )
+            return Action(ActionType.DROP, {"x": drop_tile.x, "y": drop_tile.y})
+
+        work = _select_camp_work(observation, camp, self)
+        if work is None:
+            reason = command_reason or "stock camp waiting: no visible camp items"
+            self._annotate(
+                observation,
+                reason=reason,
+                collect_reason=reason,
+            )
+            return Action(ActionType.WAIT, {"ticks": 1})
+
+        _source, active_slot = work
+        target = _select_stack_source(observation, active_slot.state, self)
+        if target is None:
+            reason = (
+                f"stock camp waiting: no visible {active_slot.state.item_name} "
+                f"for slot {active_slot.slot_id}"
+            )
+            self._annotate(
+                observation,
+                reason=reason,
+                collect_reason=reason,
+                collect_target_name=active_slot.state.item_name,
+            )
+            return Action(ActionType.WAIT, {"ticks": 1})
+
+        if _is_adjacent_or_same(observation.self.tile, target.tile):
+            pickup_action = self._decide_collect_pickup(
+                observation,
+                target,
+                reason_prefix="pick up",
+                reason_suffix=f"for camp slot {active_slot.slot_id}",
+            )
+            if pickup_action is not None:
+                return pickup_action
+
+        reason = (
+            command_reason
+            or f"move to {target.name} for camp slot {active_slot.slot_id}"
+        )
         self._annotate(
             observation,
             collect_target=target.tile,
@@ -482,14 +745,154 @@ class MovementFollowPolicy(Policy):
         )
         return Action(ActionType.MOVE_TO, {"x": target.tile.x, "y": target.tile.y})
 
-    def _clear_collect(self) -> None:
+    def _decide_make_sharp_stone(
+        self,
+        observation: Observation,
+        command_reason: str | None,
+    ) -> Action:
+        if observation.self.held_pending:
+            return self._craft_wait(observation, "craft action pending", command_reason)
+
+        if _is_holding_sharp_stone(observation):
+            reason = "make sharp stone complete"
+            self._reset_task_modes()
+            self.mode = "idle"
+            self._annotate(observation, reason=reason, collect_reason=reason)
+            return Action(ActionType.WAIT, {"ticks": 1})
+
+        if _is_holding_loose_stone(observation):
+            return self._decide_make_sharp_stone_on_rock(observation, command_reason)
+
+        held_name = observation.self.held_object_name or "object"
+        if observation.self.held_object_id is not None or observation.self.is_holding_food:
+            drop_tile = _select_drop_tile(observation)
+            if drop_tile is None:
+                return self._craft_wait(
+                    observation,
+                    f"cannot drop held {held_name}",
+                    command_reason,
+                )
+            retry_reason = self._collect_drop_retry_reason(observation, drop_tile)
+            if retry_reason is not None:
+                return self._craft_wait(observation, retry_reason, command_reason)
+            self._note_collect_drop_attempt(observation, drop_tile)
+            reason = f"drop held {held_name} before make sharp stone"
+            self._annotate(observation, reason=reason, collect_reason=reason)
+            return Action(ActionType.DROP, {"x": drop_tile.x, "y": drop_tile.y})
+
+        settle_reason = self._collect_drop_settle_reason(observation)
+        if settle_reason is not None:
+            return self._craft_wait(observation, settle_reason, command_reason)
+
+        self._clear_collect_drop()
+
+        stone = _nearest_loose_stone(observation)
+        if stone is None:
+            return self._craft_wait(
+                observation,
+                command_reason or "loose stone not visible",
+                command_reason,
+            )
+
+        if observation.self.tile == stone.tile or _is_adjacent(
+            observation.self.tile,
+            stone.tile,
+        ):
+            pickup_action = self._decide_collect_pickup(
+                observation,
+                stone,
+                reason_prefix="pick up",
+            )
+            if pickup_action is not None:
+                return pickup_action
+
+        reason = command_reason or f"move to {stone.name}"
+        self._annotate(
+            observation,
+            collect_target=stone.tile,
+            reason=reason,
+            collect_reason=reason,
+            collect_target_name=stone.name,
+        )
+        return Action(ActionType.MOVE_TO, {"x": stone.tile.x, "y": stone.tile.y})
+
+    def _decide_make_sharp_stone_on_rock(
+        self,
+        observation: Observation,
+        command_reason: str | None,
+    ) -> Action:
+        rock = _nearest_big_hard_rock(observation)
+        if rock is None:
+            return self._craft_wait(
+                observation,
+                "big hard rock not visible",
+                command_reason,
+            )
+
+        if not _is_adjacent(observation.self.tile, rock.tile):
+            approach = _approach_tile_near(observation, rock.tile)
+            if approach is None:
+                return self._craft_wait(
+                    observation,
+                    "no walkable tile beside big hard rock",
+                    command_reason,
+                )
+            if observation.self.tile != approach:
+                reason = "move beside big hard rock"
+                self._annotate(
+                    observation,
+                    collect_target=rock.tile,
+                    reason=reason,
+                    collect_reason=reason,
+                    collect_target_name=rock.name,
+                )
+                return Action(ActionType.MOVE_TO, {"x": approach.x, "y": approach.y})
+
+        if not observation.self.is_stationary:
+            return self._craft_wait(observation, "wait stationary to knap stone", command_reason)
+
+        reason = "knap stone on big hard rock"
+        self._annotate(
+            observation,
+            collect_target=rock.tile,
+            reason=reason,
+            collect_reason=reason,
+            collect_target_name=rock.name,
+        )
+        return Action(
+            ActionType.USE,
+            {"target_x": rock.tile.x, "target_y": rock.tile.y},
+        )
+
+    def _craft_wait(
+        self,
+        observation: Observation,
+        reason: str,
+        command_reason: str | None,
+    ) -> Action:
+        self._annotate(
+            observation,
+            reason=command_reason or reason,
+            collect_reason=reason,
+        )
+        return Action(ActionType.WAIT, {"ticks": 1})
+
+    def _reset_task_modes(self) -> None:
+        self.leader_id = None
+        self._current_target = None
         self.collect_requested_by = None
         self.collect_names = frozenset()
         self.collect_stack = None
+        self.make_sharp_stone_requested_by = None
+        self.stock_camp_requested_by = None
+        self.camp_stock = None
         self._stack_source_tile = None
         self._stack_source_set_tick = -10_000
         self._clear_collect_pickup()
         self._clear_collect_drop()
+
+    def _clear_collect(self) -> None:
+        self._reset_task_modes()
 
     def _clear_collect_pickup(self) -> None:
         self._collect_pickup_tile = None
@@ -738,6 +1141,30 @@ class MovementFollowPolicy(Policy):
             else None
         )
         observation.facts["collect_reason"] = collect_reason
+        observation.facts["make_sharp_stone_requested_by"] = self.make_sharp_stone_requested_by
+        observation.facts["stock_camp_requested_by"] = self.stock_camp_requested_by
+        camp = self.camp_stock
+        observation.facts["camp_stock"] = (
+            {
+                "requested_by": camp.requested_by,
+                "slots": tuple(
+                    {
+                        "slot_id": slot.slot_id,
+                        "item_name": slot.state.item_name,
+                        "desired_count": slot.state.desired_count,
+                        "deposited_count": slot.state.deposited_count,
+                        "depot_tile": (
+                            {"x": slot.state.depot_tile.x, "y": slot.state.depot_tile.y}
+                            if slot.state.depot_tile is not None
+                            else None
+                        ),
+                    }
+                    for slot in camp.slots
+                ),
+            }
+            if camp is not None
+            else None
+        )
         stack = self.collect_stack
         observation.facts["collect_stack"] = (
             {
@@ -774,6 +1201,13 @@ def _chat_events(observation: Observation) -> tuple[Mapping[str, Any], ...]:
     if not isinstance(raw, tuple):
         return ()
     return tuple(event for event in raw if isinstance(event, Mapping))
+
+
+def _chat_reply(text: str, age: float) -> str | None:
+    candidates = _CHAT_REPLY_CANDIDATES.get(text)
+    if candidates is None:
+        return None
+    return fit_say_from_candidates(candidates, age=age)
 
 
 def _parse_collect_command(text: str) -> str | None:
@@ -829,6 +1263,7 @@ def _stack_state_from_rule(
     requested_by: int,
     depot_origin: Tile | None,
     depot_tile: Tile | None,
+    desired_count: int = 6,
 ) -> StackCollectState:
     return StackCollectState(
         requested_by=requested_by,
@@ -841,6 +1276,134 @@ def _stack_state_from_rule(
         pile_object_id=_optional_int(rule.get("pile_object_id")),
         depot_target_ids=tuple(rule.get("depot_target_ids", ())),
         source_target_ids=tuple(rule.get("source_target_ids", ())),
+        desired_count=desired_count,
+        drop_only=bool(rule.get("drop_only", False)),
+    )
+
+
+def _camp_stock_state_from_layout(
+    observation: Observation,
+    layout: Any,
+    *,
+    requested_by: int,
+) -> CampStockState:
+    slots: list[CampSlotProgress] = []
+    for slot_spec in layout.slots:
+        rule = _resolve_stack_rule(observation, slot_spec.item_query)
+        stack_state = _stack_state_from_rule(
+            rule,
+            requested_by=requested_by,
+            depot_origin=None,
+            depot_tile=slot_spec.tile,
+            desired_count=slot_spec.desired_count,
+        )
+        slots.append(CampSlotProgress(slot_id=slot_spec.slot_id, state=stack_state))
+    return CampStockState(requested_by=requested_by, slots=tuple(slots))
+
+
+def _camp_stock_complete(camp: CampStockState) -> bool:
+    return all(
+        slot.state.deposited_count >= slot.state.desired_count for slot in camp.slots
+    )
+
+
+def _camp_stock_deposit_settle_reason(
+    policy: MovementFollowPolicy,
+    observation: Observation,
+    camp: CampStockState,
+) -> str | None:
+    for slot in camp.slots:
+        reason = policy._collect_stack_deposit_settle_reason(observation, slot.state)
+        if reason is not None:
+            return reason.replace("stack", "stock camp")
+    return None
+
+
+def _camp_slot_for_held_item(
+    observation: Observation,
+    camp: CampStockState,
+) -> CampSlotProgress | None:
+    matching: list[CampSlotProgress] = []
+    for slot in camp.slots:
+        if slot.state.deposited_count >= slot.state.desired_count:
+            continue
+        if slot.state.depot_tile is None:
+            continue
+        if _is_holding_collect_target(observation, slot.state.item_names):
+            matching.append(slot)
+    if not matching:
+        return None
+    return min(
+        matching,
+        key=lambda slot: observation.self.tile.distance_to(slot.state.depot_tile),
+    )
+
+
+def _select_camp_work(
+    observation: Observation,
+    camp: CampStockState,
+    policy: MovementFollowPolicy,
+) -> tuple[ObjectState, CampSlotProgress] | None:
+    best: tuple[int, ObjectState, CampSlotProgress] | None = None
+    for slot in camp.slots:
+        if slot.state.deposited_count >= slot.state.desired_count:
+            continue
+        source = _nearest_stack_source(observation, slot.state)
+        if source is None:
+            continue
+        distance = observation.self.tile.distance_to(source.tile)
+        if best is None or distance < best[0]:
+            best = (distance, source, slot)
+    if best is None:
+        return None
+    policy._stack_source_tile = best[1].tile
+    policy._stack_source_set_tick = observation.tick
+    return best[1], best[2]
+
+
+def _decide_stack_deposit_action(
+    observation: Observation,
+    state: StackCollectState,
+    depot: Tile,
+    depot_object: ObjectState | None,
+    policy: MovementFollowPolicy,
+    *,
+    slot_id: int | None = None,
+) -> tuple[Action, str] | None:
+    drop_only = state.drop_only
+    slot_prefix = f"camp slot {slot_id} " if slot_id is not None else ""
+    progress = f"{state.deposited_count + 1}/{state.desired_count}"
+
+    if depot_object is None:
+        policy._note_stack_deposit_attempt(observation, state, depot)
+        reason = f"{slot_prefix}start {state.item_name} stack {progress}"
+        return (
+            Action(ActionType.DROP, {"x": depot.x, "y": depot.y}),
+            reason,
+        )
+
+    if not _is_stack_depot_object(depot_object, state):
+        return None
+
+    policy._note_stack_deposit_attempt(observation, state, depot)
+    if drop_only:
+        reason = f"{slot_prefix}add {state.item_name} {progress}"
+        return (
+            Action(ActionType.DROP, {"x": depot.x, "y": depot.y}),
+            reason,
+        )
+
+    reason = f"{slot_prefix}add {state.item_name} to stack {progress}"
+    return (
+        Action(
+            ActionType.USE,
+            {
+                "target_x": depot.x,
+                "target_y": depot.y,
+                "expect_empty_hands": True,
+            },
+        ),
+        reason,
     )
 
 
@@ -848,6 +1411,20 @@ def _player_by_id(observation: Observation, player_id: int) -> PlayerState | Non
     for player in observation.nearby_players:
         if player.player_id == player_id:
             return player
+    return None
+
+
+def _speaker_tile(observation: Observation, player_id: int) -> Tile | None:
+    speaker = _player_by_id(observation, player_id)
+    if speaker is not None:
+        return speaker.tile
+    for event in reversed(_chat_events(observation)):
+        if event.get("player_id") != player_id:
+            continue
+        raw = event.get("speaker_tile")
+        if isinstance(raw, dict) and "x" in raw and "y" in raw:
+            return Tile(int(raw["x"]), int(raw["y"]))
+        break
     return None
 
 
@@ -1125,6 +1702,74 @@ def _can_step_to_known(from_tile: Tile, to_tile: Tile, blocked: set[Tile]) -> bo
         if Tile(from_tile.x, from_tile.y + dy) in blocked:
             return False
     return True
+
+
+def _is_loose_stone_name(name: str) -> bool:
+    return _normalize_name(name) == "stone"
+
+
+def _is_big_hard_rock_name(name: str) -> bool:
+    return _normalize_name(name) == "big hard rock"
+
+
+def _is_sharp_stone_name(name: str) -> bool:
+    return _normalize_name(name) == "sharp stone"
+
+
+def _is_holding_loose_stone(observation: Observation) -> bool:
+    if observation.self.held_object_id == 33:
+        return True
+    held_name = observation.self.held_object_name
+    return held_name is not None and _is_loose_stone_name(held_name)
+
+
+def _is_holding_sharp_stone(observation: Observation) -> bool:
+    if observation.self.held_object_id == 34:
+        return True
+    held_name = observation.self.held_object_name
+    return held_name is not None and _is_sharp_stone_name(held_name)
+
+
+def _nearest_loose_stone(observation: Observation) -> ObjectState | None:
+    candidates = [
+        obj for obj in observation.nearby_objects if _is_loose_stone_name(obj.name)
+    ]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda obj: observation.self.tile.distance_to(obj.tile),
+    )
+
+
+def _nearest_big_hard_rock(observation: Observation) -> ObjectState | None:
+    candidates = [
+        obj for obj in observation.nearby_objects if _is_big_hard_rock_name(obj.name)
+    ]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda obj: observation.self.tile.distance_to(obj.tile),
+    )
+
+
+def _approach_tile_near(observation: Observation, target: Tile) -> Tile | None:
+    blocked = _tile_set(observation.facts.get("blocked_tiles"))
+    blocked.update(_tile_set(observation.facts.get("known_blocking_tiles")))
+    occupied = {player.tile for player in observation.nearby_players}
+    best: Tile | None = None
+    best_distance: int | None = None
+    for candidate in _drop_candidates(target):
+        if candidate == target:
+            continue
+        if candidate in blocked or candidate in occupied:
+            continue
+        distance = observation.self.tile.distance_to(candidate)
+        if best is None or distance < best_distance:
+            best = candidate
+            best_distance = distance
+    return best
 
 
 def _optional_int(raw: Any) -> int | None:

@@ -87,6 +87,29 @@ def test_parse_lineage_message() -> None:
     assert isinstance(message, LineageMessage)
     assert message.type is ProtocolMessageType.LINEAGE
     assert message.player_id == 13
+    assert len(message.entries) == 1
+    assert message.entries[0].player_id == 13
+    assert message.entries[0].ancestor_ids == ()
+    assert message.entries[0].lineage_eve_id == 13
+
+
+def test_parse_lineage_message_multi_line() -> None:
+    message = parse_protocol_message("LN\n13 eve=13\n14 13 eve=13")
+
+    assert isinstance(message, LineageMessage)
+    assert message.player_id == 14
+    assert len(message.entries) == 2
+    assert message.entries[1].player_id == 14
+    assert message.entries[1].ancestor_ids == (13,)
+    assert message.entries[1].lineage_eve_id == 13
+
+
+def test_parse_lineage_message_deep_chain() -> None:
+    message = parse_protocol_message("LN\n20 19 18 17 eve=17")
+
+    assert message.entries[0].player_id == 20
+    assert message.entries[0].ancestor_ids == (19, 18, 17)
+    assert message.entries[0].lineage_eve_id == 17
 
 
 def test_parse_lineage_message_lists_last_line_id_only() -> None:

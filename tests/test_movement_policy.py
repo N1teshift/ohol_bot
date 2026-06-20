@@ -7,6 +7,7 @@ def _player(
     x: int,
     y: int,
     *,
+    age: float = 20.0,
     held_object_id: int | None = None,
     held_object_name: str | None = None,
     held_pending: bool = False,
@@ -15,7 +16,7 @@ def _player(
     return PlayerState(
         player_id=player_id,
         tile=Tile(x, y),
-        age=20.0,
+        age=age,
         food_store=20,
         max_food_store=20,
         held_object_id=held_object_id,
@@ -41,6 +42,55 @@ def test_movement_policy_defaults_to_idle_wait() -> None:
 
     assert action.type is ActionType.WAIT
     assert observation.facts["movement_mode"] == "idle"
+
+
+def test_movement_policy_replies_hello() -> None:
+    policy = MovementFollowPolicy()
+    observation = Observation(
+        tick=1,
+        self=_player(5, 0, 0),
+        nearby_players=(_player(8, 6, 0),),
+        facts={"chat_events": ({"sequence": 1, "player_id": 8, "text": "hello"},)},
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.SAY
+    assert action.payload["text"] == "HELLO"
+
+
+def test_movement_policy_replies_with_short_greeting_when_young() -> None:
+    policy = MovementFollowPolicy()
+    observation = Observation(
+        tick=1,
+        self=_player(5, 0, 0, age=0.0),
+        facts={"chat_events": ({"sequence": 1, "player_id": 8, "text": "hi"},)},
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.SAY
+    assert action.payload["text"] == "H"
+
+
+def test_movement_policy_queues_hello_until_stationary() -> None:
+    policy = MovementFollowPolicy()
+    observation = Observation(
+        tick=1,
+        self=_player(5, 0, 0, is_stationary=False),
+        facts={"chat_events": ({"sequence": 1, "player_id": 8, "text": "hello"},)},
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.WAIT
+    assert policy._pending_say == "HELLO"
+
+    action = policy.decide(Observation(tick=2, self=_player(5, 0, 0, is_stationary=True)))
+
+    assert action.type is ActionType.SAY
+    assert action.payload["text"] == "HELLO"
+    assert policy._pending_say is None
 
 
 def test_movement_policy_enters_follow_from_chat_command() -> None:
@@ -1001,3 +1051,308 @@ def test_parse_collect_stack_command_accepts_any_item_name() -> None:
     assert _parse_collect_stack_command("collect stack limestone") == "limestone"
     assert _parse_collect_stack_command("collect stack") is None
     assert _parse_collect_stack_command("collect stone") is None
+
+
+def test_movement_policy_set_home_here_uses_speaker_tile_without_well() -> None:
+    policy = MovementFollowPolicy()
+    observation = Observation(
+        tick=1,
+        self=_player(5, 0, 0),
+        nearby_players=(_player(8, 12, -3),),
+        facts={
+            "chat_events": (
+                {
+                    "sequence": 1,
+                    "player_id": 8,
+                    "text": "SET HOME HERE",
+                    "speaker_tile": {"x": 12, "y": -3},
+                },
+            ),
+        },
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.WAIT
+    assert observation.facts["set_home_tile"] == {"x": 12, "y": -3}
+    assert observation.facts["set_home_radius"] == 12
+    assert "no well/spring nearby" in observation.facts["follow_reason"]
+
+
+def test_movement_policy_set_home_here_snaps_to_nearby_well() -> None:
+    policy = MovementFollowPolicy()
+    observation = Observation(
+        tick=1,
+        self=_player(5, 0, 0),
+        nearby_players=(_player(8, 10, 0),),
+        nearby_objects=(_object(662, "Shallow Well", 8, 0),),
+        facts={
+            "chat_events": (
+                {
+                    "sequence": 1,
+                    "player_id": 8,
+                    "text": "set home here",
+                    "speaker_tile": {"x": 10, "y": 0},
+                },
+            ),
+        },
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.WAIT
+    assert observation.facts["set_home_tile"] == {"x": 8, "y": 0}
+    assert observation.facts["set_home_center_name"] == "shallow well"
+    assert "shallow well" in observation.facts["follow_reason"]
+
+
+def test_apply_policy_observation_effects_sets_world_home() -> None:
+    from ohol_bot.protocol_client import OholProtocolClient
+    from ohol_bot.runner import apply_policy_observation_effects
+
+    client = OholProtocolClient()
+    observation = Observation(
+        tick=1,
+        self=_player(5, 0, 0),
+        home=Tile(0, 0),
+        facts={
+            "set_home_tile": {"x": 8, "y": 0},
+            "set_home_radius": 12,
+            "set_home_center_name": "shallow well",
+        },
+    )
+
+    apply_policy_observation_effects(client, observation)
+
+    assert client.world_state.home_tile == Tile(8, 0)
+    assert client.world_state.home_radius == 12
+    assert client.world_state.home_center_name == "shallow well"
+    assert observation.facts["home_tile"] == {"x": 8, "y": 0}
+    assert observation.facts["home_radius"] == 12
+
+
+def test_movement_policy_make_sharp_stone_from_chat() -> None:
+    policy = MovementFollowPolicy()
+    observation = Observation(
+        tick=1,
+        self=_player(5, 0, 0),
+        facts={"chat_events": ({"sequence": 1, "player_id": 8, "text": "MAKE SHARP STONE"},)},
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.WAIT
+    assert policy.mode == "make_sharp_stone"
+    assert policy.make_sharp_stone_requested_by == 8
+    assert observation.facts["movement_mode"] == "make_sharp_stone"
+
+
+def test_movement_policy_make_sharp_stone_picks_up_loose_stone() -> None:
+    policy = MovementFollowPolicy()
+    policy.mode = "make_sharp_stone"
+    policy.make_sharp_stone_requested_by = 8
+    observation = Observation(
+        tick=1,
+        self=_player(5, 0, 0),
+        nearby_objects=(_object(33, "Stone", 1, 0),),
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.PICK_UP
+    assert action.payload == {"x": 1, "y": 0}
+    assert observation.facts["collect_reason"] == "pick up Stone"
+
+
+def test_movement_policy_make_sharp_stone_uses_rock_when_holding_stone() -> None:
+    policy = MovementFollowPolicy()
+    policy.mode = "make_sharp_stone"
+    policy.make_sharp_stone_requested_by = 8
+    observation = Observation(
+        tick=1,
+        self=_player(5, 3, 0, held_object_id=33, held_object_name="Stone"),
+        nearby_objects=(_object(32, "Big Hard Rock", 8, 0),),
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.MOVE_TO
+    assert action.payload == {"x": 7, "y": 0}
+    assert observation.facts["collect_reason"] == "move beside big hard rock"
+
+
+def test_movement_policy_make_sharp_stone_knaps_when_adjacent_to_rock() -> None:
+    policy = MovementFollowPolicy()
+    policy.mode = "make_sharp_stone"
+    policy.make_sharp_stone_requested_by = 8
+    observation = Observation(
+        tick=1,
+        self=_player(5, 5, 0, held_object_id=33, held_object_name="Stone"),
+        nearby_objects=(_object(32, "Big Hard Rock", 6, 0),),
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.USE
+    assert action.payload == {"target_x": 6, "target_y": 0}
+    assert observation.facts["collect_reason"] == "knap stone on big hard rock"
+
+
+def test_movement_policy_make_sharp_stone_completes_when_holding_result() -> None:
+    policy = MovementFollowPolicy()
+    policy.mode = "make_sharp_stone"
+    policy.make_sharp_stone_requested_by = 8
+    observation = Observation(
+        tick=3,
+        self=_player(5, 5, 1, held_object_id=34, held_object_name="Sharp Stone"),
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.WAIT
+    assert policy.mode == "idle"
+    assert policy.make_sharp_stone_requested_by is None
+    assert observation.facts["collect_reason"] == "make sharp stone complete"
+
+
+def _camp_layout_facts(home_x: int = 0, home_y: int = 0) -> dict:
+    from ohol_bot.camp_depot import build_camp_layout, camp_layout_to_facts
+
+    return camp_layout_to_facts(build_camp_layout(Tile(home_x, home_y)))
+
+
+def _camp_stack_catalog() -> tuple[dict, ...]:
+    return (
+        {
+            "display_name": "Stone",
+            "loose_names": ("stone",),
+            "pile_names": ("stone pile",),
+            "loose_object_id": 33,
+            "pile_object_id": 661,
+            "depot_target_ids": (),
+            "source_target_ids": (),
+            "query_aliases": ("stone", "stone pile"),
+        },
+        {
+            "display_name": "Flint",
+            "loose_names": ("flint",),
+            "pile_names": (),
+            "loose_object_id": 133,
+            "pile_object_id": None,
+            "depot_target_ids": (),
+            "source_target_ids": (),
+            "query_aliases": ("flint",),
+            "drop_only": True,
+        },
+    )
+
+
+def test_movement_policy_stock_camp_rejects_without_home() -> None:
+    policy = MovementFollowPolicy()
+    observation = Observation(
+        tick=1,
+        self=_player(5, 0, 0),
+        nearby_players=(_player(8, 1, 0),),
+        facts={"chat_events": ({"sequence": 1, "player_id": 8, "text": "stock camp"},)},
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.WAIT
+    assert policy.mode == "idle"
+    assert policy.camp_stock is None
+
+
+def test_movement_policy_enters_stock_camp_from_chat_command() -> None:
+    policy = MovementFollowPolicy()
+    observation = Observation(
+        tick=1,
+        self=_player(5, 0, 0),
+        home=Tile(0, 0),
+        nearby_players=(_player(8, 1, 0),),
+        facts={
+            "chat_events": ({"sequence": 1, "player_id": 8, "text": "stock camp"},),
+            "camp_layout": _camp_layout_facts(),
+            "stack_collect_catalog": _camp_stack_catalog(),
+        },
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.WAIT
+    assert policy.mode == "stock_camp"
+    assert policy.camp_stock is not None
+    assert len(policy.camp_stock.slots) == 8
+    assert policy.camp_stock.slots[0].state.desired_count == 10
+    assert policy.camp_stock.slots[0].state.depot_tile == Tile(-1, 9)
+    assert observation.facts["movement_mode"] == "stock_camp"
+
+
+def test_movement_policy_stock_camp_prioritizes_nearest_source() -> None:
+    policy = MovementFollowPolicy()
+    policy.decide(
+        Observation(
+            tick=1,
+            self=_player(5, 0, 0),
+            home=Tile(0, 0),
+            nearby_players=(_player(8, 1, 0),),
+            facts={
+                "chat_events": ({"sequence": 1, "player_id": 8, "text": "stock camp"},),
+                "camp_layout": _camp_layout_facts(),
+                "stack_collect_catalog": _camp_stack_catalog(),
+            },
+        )
+    )
+    observation = Observation(
+        tick=2,
+        self=_player(5, 0, 0),
+        home=Tile(0, 0),
+        nearby_objects=(
+            _object(33, "Stone", 5, 0),
+            _object(133, "Flint", 1, 0),
+        ),
+        facts={
+            "chat_events": ({"sequence": 1, "player_id": 8, "text": "stock camp"},),
+            "camp_layout": _camp_layout_facts(),
+            "stack_collect_catalog": _camp_stack_catalog(),
+        },
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.PICK_UP
+    assert action.payload == {"x": 1, "y": 0}
+    assert "camp slot 3" in observation.facts["collect_reason"]
+
+
+def test_movement_policy_stock_camp_deposits_at_slot_tile() -> None:
+    policy = MovementFollowPolicy()
+    layout = _camp_layout_facts()
+    policy.mode = "stock_camp"
+    policy.stock_camp_requested_by = 8
+    from ohol_bot.movement_policy import _camp_stock_state_from_layout
+    from ohol_bot.camp_depot import camp_layout_from_facts
+
+    camp_layout = camp_layout_from_facts(layout)
+    assert camp_layout is not None
+    policy.camp_stock = _camp_stock_state_from_layout(
+        Observation(
+            tick=1,
+            self=_player(5, -1, 9),
+            facts={"stack_collect_catalog": _camp_stack_catalog()},
+        ),
+        camp_layout,
+        requested_by=8,
+    )
+    observation = Observation(
+        tick=2,
+        self=_player(5, -1, 9, held_object_id=33, held_object_name="Stone"),
+        facts={"stack_collect_catalog": _camp_stack_catalog()},
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.DROP
+    assert action.payload == {"x": -1, "y": 9}
+    assert "camp slot 1" in observation.facts["collect_reason"]
+

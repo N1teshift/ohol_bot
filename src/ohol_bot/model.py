@@ -75,6 +75,23 @@ class PlayerState:
     is_stationary: bool = True
     mother_id: int | None = None
     lineage_id: int | None = None
+    ancestor_ids: tuple[int, ...] = ()
+    relation_to_self: str | None = None
+    display_id: int | None = None
+    first_name: str | None = None
+    family_name: str | None = None
+    race_id: int = 0
+    race_name: str | None = None
+
+    @property
+    def display_name(self) -> str | None:
+        if self.first_name and self.family_name:
+            return f"{self.first_name} {self.family_name}"
+        if self.first_name:
+            return self.first_name
+        if self.family_name:
+            return self.family_name
+        return None
 
     @property
     def hunger_ratio(self) -> float:
@@ -116,6 +133,7 @@ class Observation:
     nearby_objects: tuple[ObjectState, ...] = ()
     nearby_players: tuple[PlayerState, ...] = ()
     home: Tile | None = None
+    home_radius: int | None = None
     self_biome_id: int | None = None
     self_floor_id: int | None = None
     facts: dict[str, Any] = field(default_factory=dict)

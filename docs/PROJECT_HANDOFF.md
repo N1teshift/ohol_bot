@@ -299,6 +299,26 @@ Wide collision (`movement.blocking_footprint_tiles`) uses the object origin plus
 - Stack mode picks from **loose items and visible piles** (depot tile excluded), uses shared pickup reliability (stationary gate, short retry cooldown), **skips sources on danger tiles**, keeps the same source for several ticks to reduce zigzag retargeting, and uses longer open-path batches when the route is clear.
 - `stop collect`, `stop follow`, and `idle` return to idle.
 
+### Camp depot grid and `stock camp`
+
+When **`set home here`** is applied, the bot also records a fixed **3×3 camp layout** (`camp_depot.py`):
+
+- **Fire center** = well/home + **(0, +8)** (8 tiles north).
+- **8 numbered depot slots** on the ring around the fire: **NW = 1**, then **clockwise** to **W = 8**.
+
+| Slot | Item | Target |
+|------|------|--------|
+| 1 | stone | 10 |
+| 2 | sharp stone | 6 |
+| 3 | flint | 6 (drop-only; no pile in sandbox) |
+| 4 | wild onion | 6 |
+| 5 | wild carrot | 6 |
+| 6 | burdock | 6 |
+| 7 | wild garlic | 6 |
+| 8 | straight branch | 6 |
+
+**`stock camp`** (chat-driven) fills all incomplete slots **opportunistically**: each tick picks the **nearest** visible source among all slots still needing items, carries to that slot’s fixed tile, deposits, repeats. Cancel with `idle` / `stop follow` / etc. Uses `game_data.build_camp_stack_rules()` merged into the stack catalog for non-standard pile names (`Pile of Sharp Stones`, etc.). v1 gathers existing loose items / piles only (no auto-crafting sharp stones).
+
 ### Danger tiles and map semantics
 
 | Dashboard | Fact keys | Meaning |
@@ -556,7 +576,7 @@ If `Held` flips from pie → `nothing` while the in-game sprite still holds food
 | Biome attractors / fixed regions | Landmarks only; `tile_biomes` is flat coords, no regional clustering yet |
 | pytest in CI | May need `pip install pytest` locally |
 | All food edge cases | Gooseberry/berry path verified; sparse biomes may starve during long explore |
-| LN for lineage graph | LN parsed but not used for self id or `mother_id` yet |
+| LN for lineage graph | **Done** — LN populates ancestry/eve id and relations; still must not set self player id |
 
 ---
 
@@ -642,7 +662,7 @@ Wider deadly buffers, remembered threats beyond working radius, terrain/object m
 
 ### 3. Richer carry / family logic
 
-Parse **LN** for `mother_id` / lineage graph (do **not** use LN for self player id). Only wait when carried by mother (optional). Feed baby detection via **FX** / responsible player fields if needed.
+**LN lineage parsing is done** (`lineage.py`, `relationships.py`) — populates `mother_id`, genetic relations on dashboard/facts. Still optional: only wait when carried by mother (today: any adult). Feed baby detection via **FX** / responsible player fields if needed.
 
 ### 4. Second bot (when user wants)
 

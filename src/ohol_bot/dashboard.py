@@ -5,10 +5,12 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
-from .model import Action, ActionType, Observation, ObjectState, Tile
+from .danger import base_object_name
+from .model import Action, ActionType, Observation, ObjectState, PlayerState, Tile
 from .hunger import NO_MOVE_AGE, action_blocker, can_self_act
 from .map_debug import MapRenderConfig, render_observation_map
 from .protocol_client import OholProtocolClient
+from .spatial_memory import WORKING_RADIUS
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,7 +226,10 @@ def format_dashboard(
     collect_names = observation.facts.get("collect_names", ())
     collect_target = _format_fact_tile(observation.facts.get("collect_target"))
     collect_target_name = observation.facts.get("collect_target_name")
+    collect_reason = observation.facts.get("collect_reason")
     collect_stack = observation.facts.get("collect_stack")
+    camp_stock = observation.facts.get("camp_stock")
+    camp_layout = observation.facts.get("camp_layout")
     blocked_count = len(observation.facts.get("blocked_tiles", ()))
     danger_count = len(observation.facts.get("avoid_targets", ()))
     danger_preview = observation.facts.get("danger_objects", ())
@@ -240,7 +245,9 @@ def format_dashboard(
         collect_names=collect_names,
         collect_target=collect_target,
         collect_target_name=collect_target_name,
+        collect_reason=collect_reason,
         collect_stack=collect_stack,
+        camp_stock=camp_stock,
     )
 
     lines = [
@@ -250,7 +257,10 @@ def format_dashboard(
         f"Account: {client.credentials.email}   Player id: {client.self_player_id}",
         "",
         "Self",
-        f"  Position: ({player.tile.x}, {player.tile.y})   Home: {_tile_text(observation.home)}",
+        f"  Name: {player.display_name or '(unnamed)'}",
+        *_format_self_lineage(player),
+        f"  Position: ({player.tile.x}, {player.tile.y})   Home: {_observation_home(observation)}",
+        *_format_camp_layout_lines(camp_layout, camp_stock),
         f"  Age: {player.age:.2f} years (live estimate, 1yr/{observation.facts.get('age_seconds_per_year', 15):.0f}s)",
         (
             f"  Can move/self-act: {'yes' if can_self_act(player) else f'no (need age {NO_MOVE_AGE}+)'}   "
@@ -273,7 +283,7 @@ def format_dashboard(
             f"Tracked biome tiles: {observation.facts.get('tracked_biome_tiles', 0)}"
         ),
         (
-            f"  Objects in range: {len(observation.nearby_objects)} (radius 24)   "
+            f"  Objects in range: {len(observation.nearby_objects)} (radius {WORKING_RADIUS})   "
             f"Blocked tiles: {blocked_count}   Danger tiles: {danger_count}"
         ),
         f"  Danger nearby: {_format_danger_preview(danger_preview)}",
@@ -289,6 +299,9 @@ def format_dashboard(
             ).splitlines()
         ),
         "",
+        "Working memory (short)",
+        *_format_working_memory_lines(observation),
+        "",
         "Nearby players",
     ]
 
@@ -300,8 +313,11 @@ def format_dashboard(
         for other in nearby[:8]:
             distance = _chebyshev(player.tile, other.tile)
             leader_mark = "  LEADER" if other.player_id == follow_leader_id else ""
+            name = other.display_name or f"player {other.player_id}"
+            relation_mark = f" ({other.relation_to_self})" if other.relation_to_self else ""
+            race_mark = f" [{other.race_name}]" if other.race_name else ""
             lines.append(
-                f"  - player {other.player_id} at ({other.tile.x}, {other.tile.y})  "
+                f"  - {name}{relation_mark}{race_mark} at ({other.tile.x}, {other.tile.y})  "
                 f"dist={distance}{leader_mark}"
             )
     else:
@@ -371,6 +387,19 @@ def _format_next_yum(client: OholProtocolClient, player) -> str:
     return "none"
 
 
+def _format_self_lineage(player: PlayerState) -> list[str]:
+    bits: list[str] = []
+    if player.mother_id is not None:
+        bits.append(f"Mother: {player.mother_id}")
+    if player.lineage_id is not None:
+        bits.append(f"Eve line: {player.lineage_id}")
+    if player.race_name:
+        bits.append(f"Race: {player.race_name}")
+    if not bits:
+        return []
+    return [f"  Lineage: {' | '.join(bits)}"]
+
+
 def _format_held(client: OholProtocolClient, player, observation: Observation) -> str:
     if player.held_object_id is not None and player.held_object_id > 0:
         name = player.held_object_name or _object_name(client, player.held_object_id)
@@ -396,6 +425,74 @@ def _format_held(client: OholProtocolClient, player, observation: Observation) -
     return "nothing"
 
 
+def _format_working_memory_lines(observation: Observation) -> list[str]:
+    """Summarize short-term spatial memory: counts and top object types."""
+    working_count = len(observation.nearby_objects)
+    fact_count = observation.facts.get("working_memory_count")
+    if isinstance(fact_count, int):
+        working_count = fact_count
+    long_term_count = observation.facts.get("long_term_memory_count", 0)
+    if not isinstance(long_term_count, int):
+        long_term_count = 0
+    unique_types = len(
+        {base_object_name(obj.name) for obj in observation.nearby_objects}
+    )
+    promoted = observation.facts.get("memory_promoted_this_tick", 0)
+    forgotten = observation.facts.get("memory_forgotten_this_tick", 0)
+    lines = [
+        (
+            f"  Objects in working memory: {working_count} "
+            f"(radius {WORKING_RADIUS}, {unique_types} types)"
+        ),
+        f"  Long-term landmarks: {long_term_count}",
+    ]
+    if isinstance(promoted, int) and promoted > 0:
+        lines.append(f"  Promoted to long-term this tick: {promoted}")
+    if isinstance(forgotten, int) and forgotten > 0:
+        lines.append(f"  Forgotten from long-term this tick: {forgotten}")
+    lines.append("  Top types in working memory:")
+    top_types = _top_working_object_counts(observation, limit=10)
+    if top_types:
+        for name, count in top_types:
+            lines.append(f"    - {name}: {count}")
+    else:
+        lines.append("    (none)")
+    return lines
+
+
+def _top_working_object_counts(
+    observation: Observation,
+    *,
+    limit: int = 10,
+) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+    for obj in observation.nearby_objects:
+        label = base_object_name(obj.name).title()
+        counts[label] = counts.get(label, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return ranked[:limit]
+
+
+def _observation_home(observation: Observation) -> str:
+    override = observation.facts.get("home_tile")
+    if isinstance(override, dict) and "x" in override and "y" in override:
+        tile_text = f"({override['x']}, {override['y']})"
+    else:
+        tile_text = _tile_text(observation.home)
+    if tile_text == "unknown":
+        return tile_text
+    center_name = observation.facts.get("home_center_name")
+    radius = observation.facts.get("home_radius")
+    if isinstance(center_name, str) and center_name:
+        label = center_name.title()
+        if isinstance(radius, int) and radius > 0:
+            return f"{label} {tile_text}  area={radius}t"
+        return f"{label} {tile_text}"
+    if isinstance(radius, int) and radius > 0:
+        return f"{tile_text}  area={radius}t"
+    return tile_text
+
+
 def _tile_text(tile) -> str:
     if tile is None:
         return "unknown"
@@ -416,6 +513,29 @@ def _chebyshev(a: Tile, b: Tile) -> int:
     return max(abs(a.x - b.x), abs(a.y - b.y))
 
 
+def _format_camp_layout_lines(camp_layout, camp_stock) -> list[str]:
+    if not isinstance(camp_layout, dict):
+        return []
+    fire = camp_layout.get("fire_tile")
+    fire_text = _format_fact_tile(fire)
+    lines = [f"  Camp fire: {fire_text}"]
+    if isinstance(camp_stock, dict) and isinstance(camp_stock.get("slots"), tuple):
+        parts: list[str] = []
+        for slot in camp_stock["slots"]:
+            if not isinstance(slot, dict):
+                continue
+            slot_id = slot.get("slot_id")
+            deposited = slot.get("deposited_count", 0)
+            desired = slot.get("desired_count", "?")
+            item = slot.get("item_name") or "item"
+            if slot_id is None:
+                continue
+            parts.append(f"{slot_id}:{deposited}/{desired} {item}")
+        if parts:
+            lines.append(f"  Camp stock: {'  '.join(parts[:8])}")
+    return lines
+
+
 def _format_goal(
     *,
     movement_mode,
@@ -426,10 +546,19 @@ def _format_goal(
     collect_names,
     collect_target: str,
     collect_target_name,
+    collect_reason,
     collect_stack,
+    camp_stock=None,
 ) -> str:
+    if movement_mode == "stock_camp":
+        return _format_stock_camp_goal(camp_stock, collect_reason)
     if movement_mode == "collect_stack":
         return _format_collect_stack_goal(collect_stack)
+    if movement_mode == "make_sharp_stone":
+        detail = collect_reason or collect_target_name or "in progress"
+        if collect_target != "none":
+            return f"make sharp stone at {collect_target}: {detail}"
+        return f"make sharp stone: {detail}"
     if movement_mode == "collect":
         target_name = _format_collect_name(collect_names, collect_target_name)
         if collect_target != "none":
@@ -442,6 +571,24 @@ def _format_goal(
         f"follow target {follow_target}, leader {leader_id} at {leader_tile}, "
         f"dist={distance}"
     )
+
+
+def _format_stock_camp_goal(raw, collect_reason) -> str:
+    if not isinstance(raw, dict):
+        return "stock camp"
+    slots = raw.get("slots")
+    if not isinstance(slots, tuple):
+        return collect_reason or "stock camp"
+    incomplete = 0
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+        deposited = slot.get("deposited_count", 0)
+        desired = slot.get("desired_count", 0)
+        if isinstance(desired, int) and deposited < desired:
+            incomplete += 1
+    detail = collect_reason or f"{incomplete} slots remaining"
+    return f"stock camp: {detail}"
 
 
 def _format_collect_stack_goal(raw) -> str:
@@ -473,7 +620,14 @@ def _format_last_chat(observation: Observation) -> str:
         return "none"
     player_id = event.get("player_id", "?")
     text = event.get("text", "")
-    return f"player {player_id}: {text}"
+    speaker_name = event.get("speaker_name")
+    label = speaker_name if speaker_name else f"player {player_id}"
+    naming = event.get("naming")
+    if isinstance(naming, dict):
+        target_name = naming.get("display_name")
+        if target_name:
+            return f"{label}: {text}  -> named {target_name}"
+    return f"{label}: {text}"
 
 
 def _action_label(action: Action | None) -> str:

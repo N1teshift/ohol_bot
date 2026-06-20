@@ -19,6 +19,7 @@ from ohol_bot.world_state import WorldState
 
 def test_serialize_protocol_probe_actions() -> None:
     assert serialize_action(Action(ActionType.SAY, {"text": "HELLO"})) == "SAY 0 0 HELLO#"
+    assert serialize_action(Action(ActionType.SAY, {"text": "hi"})) == "SAY 0 0 HI#"
     assert serialize_action(Action(ActionType.MOVE_TO, {"x": 3, "y": -2, "sequence": 1})) == "MOVE 0 0 @1 1 0#"
     assert serialize_action(Action(ActionType.FORCE, {"x": 3, "y": -2})) == "FORCE 3 -2#"
     assert serialize_action(Action(ActionType.PICK_UP, {"x": 1, "y": 2})) == "USE 1 2#"
@@ -221,7 +222,7 @@ def test_world_state_exposes_chat_events() -> None:
     observation = world.to_observation()
 
     assert observation.facts["chat_events"] == (
-        {"sequence": 1, "player_id": 8, "text": "follow"},
+        {"sequence": 1, "player_id": 8, "text": "follow", "speaker_name": None},
     )
 
 

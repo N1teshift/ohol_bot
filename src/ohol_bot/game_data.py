@@ -19,6 +19,21 @@ class OholObject:
     num_uses: int = 1
     deadly_distance: int = 0
     spawn_biomes: frozenset[int] = frozenset()
+    male: bool = True
+    race: int = 0
+    home_marker: bool = False
+
+
+RACE_NAMES: dict[int, str] = {
+    1: "African",
+    2: "Asian",
+    3: "Caucasian",
+    4: "Native",
+}
+
+
+def race_name_for_id(race_id: int) -> str | None:
+    return RACE_NAMES.get(race_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +97,9 @@ def parse_object_file(path: str | Path) -> OholObject:
         num_uses=_safe_int(values.get("numUses", "1").split(",", maxsplit=1)[0], 1),
         deadly_distance=_safe_int(values.get("deadlyDistance", "0"), 0),
         spawn_biomes=_parse_spawn_biomes(lines),
+        male=values.get("male", "1") != "0",
+        race=_safe_int(values.get("race", "0"), 0) or 0,
+        home_marker=values.get("homeMarker", "0") == "1",
     )
 
 
@@ -230,3 +248,167 @@ def build_stack_collect_catalog(
         )
 
     return tuple(rules)
+
+
+# Manual camp-depot stack rules for piles that auto-catalog misses (non "{name} pile" names).
+_CAMP_STACK_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "loose_name": "stone",
+        "pile_names": ("stone pile",),
+        "aliases": ("stones",),
+    },
+    {
+        "loose_name": "sharp stone",
+        "pile_names": ("pile of sharp stones",),
+        "aliases": ("sharp stones",),
+    },
+    {
+        "loose_name": "flint",
+        "pile_names": (),
+        "aliases": ("flints",),
+        "drop_only": True,
+    },
+    {
+        "loose_name": "wild onion",
+        "pile_names": ("pile of wild onions",),
+        "aliases": ("wild onions", "onion", "onions"),
+    },
+    {
+        "loose_name": "wild carrot",
+        "pile_names": ("pile of wild carrots", "carrot pile"),
+        "aliases": ("wild carrots", "carrot", "carrots"),
+    },
+    {
+        "loose_name": "burdock",
+        "pile_names": ("pile of burdock roots",),
+        "aliases": ("burdocks", "burdock root", "burdock roots"),
+    },
+    {
+        "loose_name": "wild garlic",
+        "pile_names": ("pile of wild garlic", "garlic bulb pile"),
+        "aliases": ("wild garlics", "garlic", "garlics"),
+    },
+    {
+        "loose_name": "straight branch",
+        "pile_names": ("pile of straight branches",),
+        "aliases": (
+            "straight branches",
+            "long branch",
+            "long branches",
+            "branch",
+            "branches",
+        ),
+    },
+)
+
+
+def _object_by_normalized_name(
+    game_data: OholGameData,
+    name: str,
+) -> OholObject | None:
+    normalized = _normalize_object_name(name)
+    for obj in game_data.objects.values():
+        if _normalize_object_name(obj.name) == normalized:
+            return obj
+    return None
+
+
+def _transition_ids_for_stack(
+    game_data: OholGameData,
+    *,
+    loose_id: int,
+    pile_id: int | None,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    if pile_id is None:
+        return (), ()
+    depot_target_ids = tuple(
+        sorted(
+            {
+                transition.target_id
+                for transition in game_data.transitions
+                if transition.actor_id == loose_id
+                and transition.new_target_id == pile_id
+            }
+        )
+    )
+    source_target_ids = tuple(
+        sorted(
+            {
+                transition.target_id
+                for transition in game_data.transitions
+                if transition.actor_id == 0 and transition.new_actor_id == loose_id
+            }
+        )
+    )
+    return depot_target_ids, source_target_ids
+
+
+def build_camp_stack_rules(
+    game_data: OholGameData | None,
+) -> tuple[dict[str, Any], ...]:
+    if game_data is None:
+        return ()
+
+    rules: list[dict[str, Any]] = []
+    for spec in _CAMP_STACK_SPECS:
+        loose_name = spec["loose_name"]
+        loose_obj = _object_by_normalized_name(game_data, loose_name)
+        if loose_obj is None:
+            continue
+        pile_names: tuple[str, ...] = spec.get("pile_names", ())
+        pile_obj = None
+        for pile_name in pile_names:
+            pile_obj = _object_by_normalized_name(game_data, pile_name)
+            if pile_obj is not None:
+                break
+        loose_id = loose_obj.object_id
+        pile_id = pile_obj.object_id if pile_obj is not None else None
+        depot_target_ids, source_target_ids = _transition_ids_for_stack(
+            game_data,
+            loose_id=loose_id,
+            pile_id=pile_id,
+        )
+        aliases = tuple(
+            sorted(
+                {
+                    loose_name,
+                    *pile_names,
+                    *spec.get("aliases", ()),
+                    loose_name.replace(" ", ""),
+                }
+            )
+        )
+        rules.append(
+            {
+                "display_name": loose_obj.name,
+                "loose_names": (loose_name,),
+                "pile_names": pile_names,
+                "loose_object_id": loose_id,
+                "pile_object_id": pile_id,
+                "depot_target_ids": depot_target_ids,
+                "source_target_ids": source_target_ids,
+                "query_aliases": aliases,
+                "drop_only": bool(spec.get("drop_only", False)),
+            }
+        )
+    return tuple(rules)
+
+
+def merge_camp_stack_catalog(
+    catalog: tuple[dict[str, Any], ...],
+    game_data: OholGameData | None,
+) -> tuple[dict[str, Any], ...]:
+    """Merge auto-catalog rules with camp overrides (camp wins on loose_object_id)."""
+    camp_rules = build_camp_stack_rules(game_data)
+    if not camp_rules:
+        return catalog
+    by_loose_id: dict[int, dict[str, Any]] = {}
+    for rule in catalog:
+        loose_id = rule.get("loose_object_id")
+        if isinstance(loose_id, int):
+            by_loose_id[loose_id] = dict(rule)
+    for rule in camp_rules:
+        loose_id = rule.get("loose_object_id")
+        if isinstance(loose_id, int):
+            by_loose_id[loose_id] = dict(rule)
+    return tuple(by_loose_id[loose_id] for loose_id in sorted(by_loose_id))
