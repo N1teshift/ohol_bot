@@ -42,9 +42,11 @@ from .stack_collect import (
 )
 
 from .interact_flow import (
+    approach_tile_orthogonal,
+    can_interact_with_tile,
     decide_navigate_or_pickup,
+    decide_navigate_to_interact,
     decide_pickup_action,
-    drop_candidates,
     ensure_empty_hands,
     maybe_sync_pickup_state,
     select_drop_tile,
@@ -67,10 +69,7 @@ from .spatial_queries import nearest_object, object_at_tile
 from .tiles import (
     chebyshev,
     danger_tiles,
-    is_adjacent,
-    is_adjacent_or_same,
     is_orthogonally_adjacent,
-    tile_set_from_facts,
 )
 
 
@@ -252,16 +251,21 @@ class MovementFollowPolicy(Policy):
 
         if observation.self.held_object_id is not None or observation.self.is_holding_food:
             if is_holding_collect_target(observation, state.item_names):
-                if not is_adjacent_or_same(observation.self.tile, depot):
-                    reason = f"return to stack depot with {state.item_name}"
+                if not can_interact_with_tile(observation.self.tile, depot):
+                    move_action, move_reason = decide_navigate_to_interact(
+                        observation,
+                        depot,
+                        target_name=state.item_name,
+                        reason_prefix="return to stack depot with",
+                    )
                     self._annotate(
                         observation,
                         collect_target=depot,
-                        reason=reason,
-                        collect_reason=reason,
+                        reason=move_reason,
+                        collect_reason=move_reason,
                         collect_target_name=state.item_name,
                     )
-                    return Action(ActionType.MOVE_TO, {"x": depot.x, "y": depot.y})
+                    return move_action
 
                 depot_object = object_at_tile(observation, depot)
                 deposit_action, deposit_reason = decide_stack_deposit_action(
@@ -332,25 +336,12 @@ class MovementFollowPolicy(Policy):
             )
             return Action(ActionType.WAIT, {"ticks": 1})
 
-        if is_adjacent_or_same(observation.self.tile, target.tile):
-            pickup_action = self._decide_collect_pickup(
-                observation,
-                target,
-                reason_prefix="pick up",
-                reason_suffix="for stack",
-            )
-            if pickup_action is not None:
-                return pickup_action
-
-        reason = command_reason or f"move to {target.name} for stack"
-        self._annotate(
+        return self._decide_navigate_or_pickup(
             observation,
-            collect_target=target.tile,
-            reason=reason,
-            collect_reason=reason,
-            collect_target_name=target.name,
+            target,
+            reason_prefix="pick up",
+            reason_suffix="for stack",
         )
-        return Action(ActionType.MOVE_TO, {"x": target.tile.x, "y": target.tile.y})
 
     def _decide_stock_camp(
         self,
@@ -441,19 +432,23 @@ class MovementFollowPolicy(Policy):
                         collect_reason=reason,
                     )
                     return Action(ActionType.WAIT, {"ticks": 1})
-                if not is_adjacent_or_same(observation.self.tile, depot):
-                    reason = (
-                        f"return to camp slot {active_slot.slot_id} "
-                        f"with {active_slot.state.item_name}"
+                if not can_interact_with_tile(observation.self.tile, depot):
+                    move_action, move_reason = decide_navigate_to_interact(
+                        observation,
+                        depot,
+                        target_name=active_slot.state.item_name,
+                        reason_prefix=(
+                            f"return to camp slot {active_slot.slot_id} with"
+                        ),
                     )
                     self._annotate(
                         observation,
                         collect_target=depot,
-                        reason=reason,
-                        collect_reason=reason,
+                        reason=move_reason,
+                        collect_reason=move_reason,
                         collect_target_name=active_slot.state.item_name,
                     )
-                    return Action(ActionType.MOVE_TO, {"x": depot.x, "y": depot.y})
+                    return move_action
 
                 depot_object = object_at_tile(observation, depot)
                 deposit_action, deposit_reason = decide_stack_deposit_action(
@@ -558,28 +553,12 @@ class MovementFollowPolicy(Policy):
             )
             return Action(ActionType.WAIT, {"ticks": 1})
 
-        if is_adjacent_or_same(observation.self.tile, target.tile):
-            pickup_action = self._decide_collect_pickup(
-                observation,
-                target,
-                reason_prefix="pick up",
-                reason_suffix=f"for camp slot {active_slot.slot_id}",
-            )
-            if pickup_action is not None:
-                return pickup_action
-
-        reason = (
-            command_reason
-            or f"move to {target.name} for camp slot {active_slot.slot_id}"
-        )
-        self._annotate(
+        return self._decide_navigate_or_pickup(
             observation,
-            collect_target=target.tile,
-            reason=reason,
-            collect_reason=reason,
-            collect_target_name=target.name,
+            target,
+            reason_prefix="pick up",
+            reason_suffix=f"for camp slot {active_slot.slot_id}",
         )
-        return Action(ActionType.MOVE_TO, {"x": target.tile.x, "y": target.tile.y})
 
     def _maybe_note_stack_deposit_complete(
         self,
@@ -738,27 +717,38 @@ class MovementFollowPolicy(Policy):
                 command_reason,
             )
 
-        if observation.self.tile == stone.tile or is_adjacent(
-            observation.self.tile,
-            stone.tile,
-        ):
-            pickup_action = self._decide_collect_pickup(
-                observation,
-                stone,
-                reason_prefix="pick up",
-            )
-            if pickup_action is not None:
-                return pickup_action
+        return self._decide_navigate_or_pickup(
+            observation,
+            stone,
+            reason_prefix="pick up",
+        )
 
-        reason = command_reason or f"move to {stone.name}"
+    def _decide_navigate_or_pickup(
+        self,
+        observation: Observation,
+        target: ObjectState,
+        *,
+        reason_prefix: str,
+        reason_suffix: str | None = None,
+    ) -> Action:
+        action, reason = decide_navigate_or_pickup(
+            observation,
+            target,
+            pending=self._pickup_pending,
+            pickup_retry_reason=self._collect_pickup_retry_reason,
+            note_pickup_attempt=self._note_collect_pickup_attempt,
+            clear_pickup=self._clear_collect_pickup,
+            reason_prefix=reason_prefix,
+            reason_suffix=reason_suffix,
+        )
         self._annotate(
             observation,
-            collect_target=stone.tile,
+            collect_target=target.tile,
             reason=reason,
             collect_reason=reason,
-            collect_target_name=stone.name,
+            collect_target_name=target.name,
         )
-        return Action(ActionType.MOVE_TO, {"x": stone.tile.x, "y": stone.tile.y})
+        return action
 
     def _decide_make_sharp_stone_on_rock(
         self,
@@ -774,7 +764,7 @@ class MovementFollowPolicy(Policy):
             )
 
         if not is_orthogonally_adjacent(observation.self.tile, rock.tile):
-            approach = _approach_tile_orthogonal(observation, rock.tile)
+            approach = approach_tile_orthogonal(observation, rock.tile)
             if approach is None:
                 return self._craft_wait(
                     observation,
@@ -927,7 +917,7 @@ class MovementFollowPolicy(Policy):
                     return None
 
                 if not is_orthogonally_adjacent(observation.self.tile, plant.tile):
-                    approach = _approach_tile_orthogonal(observation, plant.tile)
+                    approach = approach_tile_orthogonal(observation, plant.tile)
                     if approach is None:
                         self._craft_wait(
                             observation,
@@ -994,7 +984,7 @@ class MovementFollowPolicy(Policy):
             dug = object_at_tile(observation, work_tile)
             if dug is not None and object_matches_harvest_dug(dug, rule):
                 if not is_orthogonally_adjacent(observation.self.tile, work_tile):
-                    approach = _approach_tile_orthogonal(observation, work_tile)
+                    approach = approach_tile_orthogonal(observation, work_tile)
                     if approach is None:
                         self._craft_wait(
                             observation,
@@ -1044,39 +1034,32 @@ class MovementFollowPolicy(Policy):
 
         tool = nearest_loose_harvest_tool(observation, rule)
         if tool is not None:
-            if is_adjacent_or_same(observation.self.tile, tool.tile):
-                pickup_action = self._decide_collect_pickup(
-                    observation,
-                    tool,
-                    reason_prefix="pick up",
-                    reason_suffix="for harvest",
-                )
-                if pickup_action is not None:
-                    return pickup_action
-            reason = command_reason or f"move to {tool.name} for harvest"
-            self._annotate(
+            return self._decide_navigate_or_pickup(
                 observation,
-                collect_target=tool.tile,
-                reason=reason,
-                collect_reason=reason,
-                collect_target_name=tool.name,
+                tool,
+                reason_prefix="pick up",
+                reason_suffix="for harvest",
             )
-            return Action(ActionType.MOVE_TO, {"x": tool.tile.x, "y": tool.tile.y})
 
         knap_action = self._decide_acquire_sharp_stone_step(observation, command_reason)
         if knap_action is not None:
             return knap_action
 
         if plant is not None:
-            reason = command_reason or f"move to {plant.name} for harvest"
+            move_action, move_reason = decide_navigate_to_interact(
+                observation,
+                plant.tile,
+                target_name=plant.name,
+                reason_prefix="move beside",
+            )
             self._annotate(
                 observation,
                 collect_target=plant.tile,
-                reason=reason,
-                collect_reason=reason,
+                reason=move_reason,
+                collect_reason=move_reason,
                 collect_target_name=plant.name,
             )
-            return Action(ActionType.MOVE_TO, {"x": plant.tile.x, "y": plant.tile.y})
+            return move_action
 
         return None
 
@@ -1093,48 +1076,23 @@ class MovementFollowPolicy(Policy):
 
         sharp = nearest_loose_sharp_stone(observation)
         if sharp is not None:
-            if is_adjacent_or_same(observation.self.tile, sharp.tile):
-                pickup_action = self._decide_collect_pickup(
-                    observation,
-                    sharp,
-                    reason_prefix="pick up",
-                    reason_suffix="for harvest",
-                )
-                if pickup_action is not None:
-                    return pickup_action
-            reason = command_reason or f"move to {sharp.name}"
-            self._annotate(
+            return self._decide_navigate_or_pickup(
                 observation,
-                collect_target=sharp.tile,
-                reason=reason,
-                collect_reason=reason,
-                collect_target_name=sharp.name,
+                sharp,
+                reason_prefix="pick up",
+                reason_suffix="for harvest",
             )
-            return Action(ActionType.MOVE_TO, {"x": sharp.tile.x, "y": sharp.tile.y})
 
         stone = _nearest_loose_stone(observation)
         if stone is None:
             return None
 
-        if is_adjacent_or_same(observation.self.tile, stone.tile):
-            pickup_action = self._decide_collect_pickup(
-                observation,
-                stone,
-                reason_prefix="pick up",
-                reason_suffix="to knap",
-            )
-            if pickup_action is not None:
-                return pickup_action
-
-        reason = command_reason or f"move to {stone.name} to knap"
-        self._annotate(
+        return self._decide_navigate_or_pickup(
             observation,
-            collect_target=stone.tile,
-            reason=reason,
-            collect_reason=reason,
-            collect_target_name=stone.name,
+            stone,
+            reason_prefix="pick up",
+            reason_suffix="to knap",
         )
-        return Action(ActionType.MOVE_TO, {"x": stone.tile.x, "y": stone.tile.y})
 
     def _reset_task_modes(self) -> None:
         self.leader_id = None
@@ -1401,42 +1359,6 @@ def _nearest_big_hard_rock(observation: Observation) -> ObjectState | None:
         predicate=lambda obj: is_big_hard_rock_name(obj.name),
         skip_danger=False,
     )
-
-
-def _approach_tile_orthogonal(observation: Observation, target: Tile) -> Tile | None:
-    """Walkable tile orthogonally beside target (OHOL USE requires N/S/E/W, not diagonal)."""
-    blocked = tile_set_from_facts(observation.facts.get("blocked_tiles"))
-    blocked.update(tile_set_from_facts(observation.facts.get("known_blocking_tiles")))
-    occupied = {player.tile for player in observation.nearby_players}
-    best: Tile | None = None
-    best_distance: int | None = None
-    for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-        candidate = Tile(target.x + dx, target.y + dy)
-        if candidate in blocked or candidate in occupied:
-            continue
-        distance = observation.self.tile.distance_to(candidate)
-        if best is None or distance < best_distance:
-            best = candidate
-            best_distance = distance
-    return best
-
-
-def _approach_tile_near(observation: Observation, target: Tile) -> Tile | None:
-    blocked = tile_set_from_facts(observation.facts.get("blocked_tiles"))
-    blocked.update(tile_set_from_facts(observation.facts.get("known_blocking_tiles")))
-    occupied = {player.tile for player in observation.nearby_players}
-    best: Tile | None = None
-    best_distance: int | None = None
-    for candidate in drop_candidates(target):
-        if candidate == target:
-            continue
-        if candidate in blocked or candidate in occupied:
-            continue
-        distance = observation.self.tile.distance_to(candidate)
-        if best is None or distance < best_distance:
-            best = candidate
-            best_distance = distance
-    return best
 
 
 from .stack_collect import (  # noqa: E402 — test/backward-compat re-exports

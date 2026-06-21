@@ -292,7 +292,7 @@ def test_movement_policy_enters_collect_from_chat_command() -> None:
     action = policy.decide(observation)
 
     assert action.type is ActionType.MOVE_TO
-    assert action.payload == {"x": 3, "y": 0}
+    assert action.payload == {"x": 2, "y": 0}
     assert policy.mode == "collect"
     assert policy.collect_requested_by == 8
     assert policy.collect_names == frozenset({"sharp stone"})
@@ -317,7 +317,7 @@ def test_movement_policy_collects_closest_matching_object() -> None:
     action = policy.decide(observation)
 
     assert action.type is ActionType.MOVE_TO
-    assert action.payload == {"x": 2, "y": 0}
+    assert action.payload == {"x": 1, "y": 0}
 
 
 def test_movement_policy_collect_picks_up_adjacent_item() -> None:
@@ -1181,6 +1181,23 @@ def test_movement_policy_make_sharp_stone_uses_rock_when_holding_stone() -> None
     assert action.type is ActionType.MOVE_TO
     assert action.payload == {"x": 7, "y": 0}
     assert observation.facts["collect_reason"] == "move beside big hard rock"
+
+
+def test_movement_policy_make_sharp_stone_picks_up_stone_from_diagonal() -> None:
+    policy = MovementFollowPolicy()
+    policy.mode = "make_sharp_stone"
+    policy.make_sharp_stone_requested_by = 8
+    observation = Observation(
+        tick=1,
+        self=_player(5, 7, 1),
+        nearby_objects=(_object(33, "Stone", 8, 0),),
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.MOVE_TO
+    assert action.payload in ({"x": 8, "y": 1}, {"x": 7, "y": 0})
+    assert observation.facts["collect_reason"] == "move beside Stone"
 
 
 def test_movement_policy_knap_moves_off_diagonal_before_use() -> None:

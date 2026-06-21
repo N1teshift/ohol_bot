@@ -90,4 +90,4 @@ def test_collect_moves_to_remembered_collect_fact() -> None:
 
     assert result is not None
     assert result.action.type is ActionType.MOVE_TO
-    assert result.action.payload == {"x": -2, "y": 4}
+    assert result.action.payload == {"x": -2, "y": 3}

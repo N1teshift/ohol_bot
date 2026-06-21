@@ -31,7 +31,7 @@ def test_survival_planner_moves_to_remembered_food_when_hungry() -> None:
     result = run_episode(client, SurvivalPlanner(), max_ticks=1)
 
     assert result.actions[0].type is ActionType.MOVE_TO
-    assert result.actions[0].payload == {"x": 4, "y": 0}
+    assert result.actions[0].payload == {"x": 3, "y": 0}
 
 
 def test_survival_planner_moves_to_food_when_hungry() -> None:
@@ -60,7 +60,7 @@ def test_survival_planner_moves_to_food_when_hungry() -> None:
 
     assert result.survived is True
     assert result.actions[0].type is ActionType.MOVE_TO
-    assert result.actions[0].payload == {"x": 2, "y": 0}
+    assert result.actions[0].payload == {"x": 1, "y": 0}
 
 
 def test_survival_planner_eats_held_food_when_hungry() -> None:
@@ -244,7 +244,7 @@ def test_survival_planner_recipe_behavior_opt_in() -> None:
     )
 
     assert result.actions[0].type is ActionType.MOVE_TO
-    assert result.actions[0].payload == {"x": 3, "y": 0}
+    assert result.actions[0].payload == {"x": 2, "y": 0}
 
 
 def test_survival_planner_seeks_food_with_one_pip_missing() -> None:

@@ -8,7 +8,7 @@ from .model import Action, ActionType, Observation
 from .recipe_graph import direct_recipe_input_names_for_output
 from .skills import SkillLibrary, _explore_step
 from .spatial_queries import nearest_object
-from .tiles import is_adjacent
+from .interact_flow import approach_tile_orthogonal, can_interact_with_tile
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,13 +95,16 @@ class RecipeBehavior:
         if target is None:
             return None
 
-        if player.tile == target.tile or is_adjacent(player.tile, target.tile):
+        if can_interact_with_tile(player.tile, target.tile):
             return BehaviorResult(
                 action=Action(ActionType.PICK_UP, {"x": target.tile.x, "y": target.tile.y}),
                 reason=f"recipe gather {target.name}",
             )
 
+        approach = approach_tile_orthogonal(observation, target.tile)
+        if approach is None:
+            return None
         return BehaviorResult(
-            action=Action(ActionType.MOVE_TO, {"x": target.tile.x, "y": target.tile.y}),
-            reason=f"recipe move to {target.name}",
+            action=Action(ActionType.MOVE_TO, {"x": approach.x, "y": approach.y}),
+            reason=f"recipe move beside {target.name}",
         )

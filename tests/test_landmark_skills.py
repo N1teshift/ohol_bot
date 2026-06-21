@@ -40,7 +40,7 @@ def test_forage_moves_toward_remembered_food() -> None:
 
     assert result is not None
     assert result.action.type is ActionType.MOVE_TO
-    assert result.action.payload == {"x": 5, "y": 0}
+    assert result.action.payload == {"x": 4, "y": 0}
     assert "remembered gooseberry" in result.reason
 
 
@@ -79,5 +79,5 @@ def test_collect_moves_toward_remembered_tree() -> None:
 
     assert result is not None
     assert result.action.type is ActionType.MOVE_TO
-    assert result.action.payload == {"x": 0, "y": 8}
+    assert result.action.payload == {"x": 0, "y": 7}
     assert "remembered Maple Tree" in result.reason

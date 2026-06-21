@@ -4,7 +4,51 @@ from collections.abc import Callable
 
 from .action_pending import PendingAction
 from .model import Action, ActionType, ObjectState, Observation, Tile
-from .tiles import is_adjacent, is_adjacent_or_same, tile_set_from_facts
+from .tiles import is_orthogonally_adjacent, tile_set_from_facts
+
+
+def can_interact_with_tile(from_tile: Tile, target_tile: Tile) -> bool:
+    """OHOL USE/PICK_UP/DROP-on-target require same tile or N/S/E/W adjacency."""
+    if from_tile == target_tile:
+        return True
+    return is_orthogonally_adjacent(from_tile, target_tile)
+
+
+def approach_tile_orthogonal(observation: Observation, target: Tile) -> Tile | None:
+    """Nearest walkable tile orthogonally beside target."""
+    blocked = tile_set_from_facts(observation.facts.get("blocked_tiles"))
+    blocked.update(tile_set_from_facts(observation.facts.get("known_blocking_tiles")))
+    occupied = {player.tile for player in observation.nearby_players}
+    best: Tile | None = None
+    best_distance: int | None = None
+    for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+        candidate = Tile(target.x + dx, target.y + dy)
+        if candidate in blocked or candidate in occupied:
+            continue
+        distance = observation.self.tile.distance_to(candidate)
+        if best is None or distance < best_distance:
+            best = candidate
+            best_distance = distance
+    return best
+
+
+def decide_navigate_to_interact(
+    observation: Observation,
+    target: Tile,
+    *,
+    target_name: str,
+    reason_prefix: str = "move beside",
+) -> tuple[Action, str]:
+    if can_interact_with_tile(observation.self.tile, target):
+        return Action(ActionType.WAIT, {"ticks": 1}), f"beside {target_name}"
+    approach = approach_tile_orthogonal(observation, target)
+    if approach is None:
+        return (
+            Action(ActionType.WAIT, {"ticks": 1}),
+            f"no walkable tile beside {target_name}",
+        )
+    reason = f"{reason_prefix} {target_name}"
+    return Action(ActionType.MOVE_TO, {"x": approach.x, "y": approach.y}), reason
 
 
 def drop_candidates(tile: Tile) -> tuple[Tile, ...]:
@@ -89,7 +133,7 @@ def maybe_sync_pickup_state(
     if (
         pending.tile is not None
         and pending.tile != source_tile
-        and not is_adjacent_or_same(observation.self.tile, pending.tile)
+        and not can_interact_with_tile(observation.self.tile, pending.tile)
     ):
         clear_pickup()
 
@@ -139,10 +183,7 @@ def decide_navigate_or_pickup(
         pending=pending,
         clear_pickup=clear_pickup,
     )
-    if observation.self.tile == target.tile or is_adjacent(
-        observation.self.tile,
-        target.tile,
-    ):
+    if can_interact_with_tile(observation.self.tile, target.tile):
         return decide_pickup_action(
             observation,
             target,
@@ -152,7 +193,13 @@ def decide_navigate_or_pickup(
             reason_prefix=reason_prefix,
             reason_suffix=reason_suffix,
         )
+    approach = approach_tile_orthogonal(observation, target.tile)
+    if approach is None:
+        return (
+            Action(ActionType.WAIT, {"ticks": 1}),
+            f"no walkable tile beside {target.name}",
+        )
     return (
-        Action(ActionType.MOVE_TO, {"x": target.tile.x, "y": target.tile.y}),
-        f"move to {target.name}",
+        Action(ActionType.MOVE_TO, {"x": approach.x, "y": approach.y}),
+        f"move beside {target.name}",
     )

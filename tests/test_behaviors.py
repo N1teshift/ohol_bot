@@ -42,7 +42,7 @@ def test_recipe_behavior_moves_to_recipe_resource_when_enabled() -> None:
 
     assert result is not None
     assert result.action.type is ActionType.MOVE_TO
-    assert result.action.payload == {"x": 2, "y": 0}
+    assert result.action.payload == {"x": 1, "y": 0}
 
 
 def test_survival_behavior_still_waits_when_full_and_idle() -> None:

@@ -12,7 +12,7 @@ from .planner_facts import PlannerFacts, planner_facts
 from .model import Action, ActionType, Observation, ObjectState, Tile
 from .spatial_queries import nearest_object
 from .home import home_area_radius, is_at_home
-from .tiles import is_adjacent
+from .interact_flow import approach_tile_orthogonal, can_interact_with_tile
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +113,7 @@ class SkillLibrary:
         food = observation.nearest_food(exclude=facts.avoid_targets)
 
         if food is not None and food.tile not in facts.avoid_targets:
-            if player.tile == food.tile or is_adjacent(player.tile, food.tile):
+            if can_interact_with_tile(player.tile, food.tile):
                 return SkillResult(
                     name="forage_food",
                     action=Action(
@@ -122,10 +122,13 @@ class SkillLibrary:
                     ),
                     reason=f"pick up {food.name}",
                 )
+            approach = approach_tile_orthogonal(observation, food.tile)
+            if approach is None:
+                return None
             return SkillResult(
                 name="forage_food",
-                action=Action(ActionType.MOVE_TO, {"x": food.tile.x, "y": food.tile.y}),
-                reason=f"move to food {food.name}",
+                action=Action(ActionType.MOVE_TO, {"x": approach.x, "y": approach.y}),
+                reason=f"move beside food {food.name}",
             )
 
         remembered = _move_toward_remembered(
@@ -172,16 +175,19 @@ class SkillLibrary:
         target = nearest_object(observation, names=names, normalize_names=False)
 
         if target is not None:
-            if observation.self.tile == target.tile:
+            if can_interact_with_tile(observation.self.tile, target.tile):
                 return SkillResult(
                     name="collect_named_object",
                     action=Action(ActionType.PICK_UP, {"x": target.tile.x, "y": target.tile.y}),
                     reason=f"pick up {target.name}",
                 )
+            approach = approach_tile_orthogonal(observation, target.tile)
+            if approach is None:
+                return None
             return SkillResult(
                 name="collect_named_object",
-                action=Action(ActionType.MOVE_TO, {"x": target.tile.x, "y": target.tile.y}),
-                reason=f"move to {target.name}",
+                action=Action(ActionType.MOVE_TO, {"x": approach.x, "y": approach.y}),
+                reason=f"move beside {target.name}",
             )
 
         remembered = _move_toward_remembered(
@@ -203,7 +209,7 @@ def _adjacent_food(observation: Observation) -> ObjectState | None:
     candidates = [
         obj
         for obj in observation.nearby_objects
-        if obj.food_value > 0 and is_adjacent(observation.self.tile, obj.tile)
+        if obj.food_value > 0 and can_interact_with_tile(observation.self.tile, obj.tile)
     ]
     if not candidates:
         return None
@@ -261,16 +267,23 @@ def _move_toward_remembered(
         return None
     player = observation.self
     at_target = player.tile == target
-    adjacent = is_adjacent(player.tile, target)
-    if pickup_when_reached and (at_target or adjacent):
+    if pickup_when_reached and can_interact_with_tile(player.tile, target):
         return SkillResult(
             name="navigate_remembered",
             action=Action(ActionType.PICK_UP, {"x": target.x, "y": target.y}),
             reason=f"remembered {remembered.name} (pick up)",
         )
-    return SkillResult(
-        name="navigate_remembered",
-        action=Action(ActionType.MOVE_TO, {"x": target.x, "y": target.y}),
-        reason=f"remembered {remembered.name}",
-    )
+    if at_target:
+        return SkillResult(
+            name="navigate_remembered",
+            action=Action(ActionType.MOVE_TO, {"x": target.x, "y": target.y}),
+            reason=f"remembered {remembered.name}",
+        )
+    approach = approach_tile_orthogonal(observation, target)
+    if approach is not None:
+        return SkillResult(
+            name="navigate_remembered",
+            action=Action(ActionType.MOVE_TO, {"x": approach.x, "y": approach.y}),
+            reason=f"remembered {remembered.name}",
+        )
 

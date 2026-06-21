@@ -101,7 +101,7 @@ One-shot: `python -m ohol_bot.cli control move 10 east`. Add `--watch` for the d
 - **World state** from PU, PM, FX, MC, MX (position, hunger, map objects, players)
 - **World/action state split started**: `WorldState` (packet-derived) + `ActionFeedbackState` (move/eat/force feedback)
 - **Movement follow policy** live: idle by default, follow the player who says `follow`, return to idle on `stop follow`; wait at distance <= 1, move at distance >= 2
-- **Collect / stack / camp chat modes:** `collect <item>`, `collect stack <item>`, **`set home here`**, **`stock camp`**, **`make sharp stone`** — see table above; stack/camp modes use `game_data.build_stack_collect_catalog()` + camp rules, skip danger tiles
+- **Collect / stack / camp chat modes:** `collect <item>`, `collect stack <item>`, **`set home here`**, **`stock camp`**, **`make sharp stone`** — see table above; stack/camp modes use `game_data.build_stack_collect_catalog()` + camp rules + `harvest.py`, skip danger tiles; **orthogonal-only** USE/PICK_UP via `interact_flow.py`
 - **Home + camp depot:** `home.py` snaps home to well/spring; `camp_depot.py` defines fire + 8 slot grid on `set home here`
 - **Lineage / relationships:** LN packets → genetic relation labels on dashboard (`your sister`, etc.)
 - **Working memory on dashboard:** top object types in 24-tile radius
@@ -122,7 +122,7 @@ One-shot: `python -m ohol_bot.cli control move 10 east`. Add `--watch` for the d
 - **`scripts/verify_bot_run.py`**: 15s default movement smoke test (stuck tile, spam target, invalid paths); `--seconds 60 --max-ticks 800` for longer checks
 - Game data loader (~4400 objects, transitions) from `.ohol_runtime/server`
 - Mock scenarios and unit tests under `tests/`
-- Full regression suite: `302` tests (run `python -m pytest`)
+- Full regression suite: `307` tests (run `python -m pytest`)
 
 ## Bot API
 

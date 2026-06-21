@@ -136,7 +136,7 @@ ohol_bot/
 │   ├── stack_collect.py         # Stack/collect/camp runtime state and helpers
 │   ├── harvest_flow.py          # Dig-harvest flow re-exports from stack_collect
 │   ├── collect_rules.py         # Typed HarvestRule / StackCollectRule dataclasses
-│   ├── interact_flow.py         # Navigate/pickup/drop/empty-hands helpers
+│   ├── interact_flow.py         # Orthogonal interact adjacency + navigate/pickup/drop helpers
 │   ├── action_pending.py        # PendingAction retry/settle timers
 │   ├── tiles.py                 # Chebyshev/adjacency, fact tile parsing, danger_tiles()
 │   ├── spatial_queries.py       # nearest_object(), object_at_tile()
@@ -300,6 +300,14 @@ Path execution (`protocol_client._resolve_move_path`, `movement.walkable_path_wi
 
 Wide collision (`movement.blocking_footprint_tiles`) uses the object origin plus horizontal `leftBlockingRadius` / `rightBlockingRadius`; vertical neighbors are not blocked by radius alone.
 
+### Interaction adjacency (USE / PICK_UP / depot)
+
+**Walking** may use diagonal steps (`movement.py` 8-way BFS). **Object interaction** does not:
+
+- **USE**, **PICK_UP**, and **stack depot USE** only work on the **same tile or orthogonal neighbors (N/S/E/W)**.
+- `interact_flow.py`: `can_interact_with_tile()`, `approach_tile_orthogonal()`, `decide_navigate_or_pickup()`, `decide_navigate_to_interact()`.
+- Used by `movement_policy.py` (collect/stack/camp/knap/harvest), `skills.py` (forage, remembered landmarks), and `behaviors.py` (recipe gather).
+
 ### Collect / stack chat modes
 
 `MovementFollowPolicy` also supports object-gathering commands:
@@ -321,14 +329,14 @@ When **`set home here`** is applied, the bot also records a fixed **3×3 camp la
 |------|------|--------|
 | 1 | stone | 10 |
 | 2 | sharp stone | 6 |
-| 3 | flint | 6 (drop-only; no pile in sandbox) |
+| 3 | flint chip | 6 (drop-only; knap from Flint outcrop 133 → Flint Chips 150 → pick up chip 135) |
 | 4 | wild onion | 6 |
 | 5 | wild carrot | 6 |
 | 6 | burdock | 6 |
 | 7 | wild garlic | 6 |
 | 8 | straight branch | 6 |
 
-**`stock camp`** (chat-driven) fills all incomplete slots **opportunistically**: each tick picks the **nearest** visible source among all slots still needing items, carries to that slot’s fixed tile, deposits, repeats. Cancel with `idle` / `stop follow` / etc. Uses `game_data.build_camp_stack_rules()` merged into the stack catalog for non-standard pile names (`Pile of Sharp Stones`, etc.). v1 gathers existing loose items / piles only (no auto-crafting sharp stones).
+**`stock camp`** (chat-driven) fills all incomplete slots **opportunistically**: each tick picks the **nearest** visible source among all slots still needing items, carries to that slot’s fixed tile, deposits, repeats. Cancel with `idle` / `stop follow` / etc. Uses `game_data.build_camp_stack_rules()` merged into the stack catalog for non-standard pile names (`Pile of Sharp Stones`, etc.). **Dig-harvest** slots (burdock, wild carrot, flint) run automatically when plants/outcrops or dug/chip tiles are visible; harvest matching uses **object ids** (e.g. wild carrot plant 404 vs loose product 40 share a name). Prefers **nearby loose product** over distant dug/plant work. Drops surplus held items when a slot is already full.
 
 ### Danger tiles and map semantics
 
