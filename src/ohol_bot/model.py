@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -12,6 +13,16 @@ class Tile:
 
     def distance_to(self, other: "Tile") -> int:
         return abs(self.x - other.x) + abs(self.y - other.y)
+
+    def chebyshev_to(self, other: "Tile") -> int:
+        from .tiles import chebyshev
+
+        return chebyshev(self, other)
+
+    def is_adjacent_to(self, other: "Tile") -> bool:
+        from .tiles import is_adjacent
+
+        return is_adjacent(self, other)
 
 
 def step_toward(start: Tile, target: Tile) -> Tile:
@@ -152,6 +163,30 @@ class Observation:
     def objects_named(self, *names: str) -> tuple[ObjectState, ...]:
         wanted = set(names)
         return tuple(obj for obj in self.nearby_objects if obj.name in wanted)
+
+    def nearest_object(
+        self,
+        *,
+        names: frozenset[str] | set[str] | None = None,
+        object_ids: frozenset[int] | set[int] | None = None,
+        predicate: Callable[[ObjectState], bool] | None = None,
+        exclude_tiles: set[Tile] | frozenset[Tile] | None = None,
+        skip_danger: bool = True,
+        skip_depot: Tile | None = None,
+        normalize_names: bool = True,
+    ) -> ObjectState | None:
+        from .spatial_queries import nearest_object
+
+        return nearest_object(
+            self,
+            names=names,
+            object_ids=object_ids,
+            predicate=predicate,
+            exclude_tiles=exclude_tiles,
+            skip_danger=skip_danger,
+            skip_depot=skip_depot,
+            normalize_names=normalize_names,
+        )
 
     def nearby_biome_counts(self) -> dict[int, int]:
         raw = self.facts.get("nearby_biome_counts")

@@ -1,9 +1,11 @@
 """Run the live bot for a bounded time and fail if it gets stuck."""
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
+import warnings
 from collections import Counter
 from pathlib import Path
 
@@ -12,6 +14,11 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from ohol_bot.model import Action, ActionType, Observation, Tile
 from ohol_bot.protocol_client import OholProtocolClient, ProtocolCredentials
+
+DEFAULT_SECONDS = 15.0
+REFERENCE_SECONDS = 60.0
+FRAME_WAIT_SECONDS = 3.0
+NO_FRAME_ABORT_SECONDS = 10.0
 
 
 class MovementSmokePolicy:
@@ -31,8 +38,62 @@ class MovementSmokePolicy:
         return Action(ActionType.MOVE_TO, {"x": tile.x + dx, "y": tile.y + dy})
 
 
+def scaled_thresholds(max_seconds: float) -> dict[str, int]:
+    scale = max(0.25, max_seconds / REFERENCE_SECONDS)
+    return {
+        "stuck_consecutive": max(5, int(40 * scale)),
+        "spam_repeat": max(10, int(80 * scale)),
+        "min_unique_positions": max(3, int(8 * scale)),
+        "invalid_paths": max(2, int(8 * scale)),
+        "force_ignored": max(1, int(2 * scale)),
+    }
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Movement smoke test against the private server.",
+    )
+    parser.add_argument(
+        "--seconds",
+        type=float,
+        default=DEFAULT_SECONDS,
+        help=f"Wall-clock run limit (default: {DEFAULT_SECONDS:g})",
+    )
+    parser.add_argument(
+        "--max-ticks",
+        type=int,
+        default=None,
+        help="Optional tick cap (whichever limit is hit first)",
+    )
+    parser.add_argument(
+        "legacy_max_ticks",
+        nargs="?",
+        type=int,
+        help=argparse.SUPPRESS,
+    )
+    return parser.parse_args()
+
+
+def resolve_limits(args: argparse.Namespace) -> tuple[float, int | None]:
+    if args.legacy_max_ticks is not None:
+        warnings.warn(
+            "Positional max_ticks is deprecated; use --seconds and --max-ticks",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        max_ticks = args.legacy_max_ticks
+        # Legacy `verify_bot_run.py 800` needed ~2 minutes at typical frame rates.
+        max_seconds = max(max_ticks * 0.15, DEFAULT_SECONDS)
+        return max_seconds, max_ticks
+    return args.seconds, args.max_ticks
+
+
 def main() -> int:
-    max_ticks = int(sys.argv[1]) if len(sys.argv) > 1 else 600
+    args = parse_args()
+    max_seconds, max_ticks = resolve_limits(args)
+    thresholds = scaled_thresholds(max_seconds)
+    policy = MovementSmokePolicy()
+
     client = OholProtocolClient(
         credentials=ProtocolCredentials(
             email="bot_001@local",
@@ -42,7 +103,6 @@ def main() -> int:
         ),
         game_data_root=str(ROOT / ".ohol_runtime" / "server"),
     )
-    policy = MovementSmokePolicy()
 
     client.login()
     client.frame_paced = True
@@ -53,15 +113,37 @@ def main() -> int:
     prev_tile: Tile | None = None
     survived = True
     ticks = 0
+    missed_frames = 0
 
     log_path = ROOT / ".ohol_runtime" / "server" / "log.txt"
     log_offset = log_path.stat().st_size if log_path.exists() else 0
 
     start = time.monotonic()
+    deadline = start + max_seconds
     try:
-        for tick in range(max_ticks):
-            if not client.wait_for_frame():
+        while time.monotonic() < deadline:
+            if max_ticks is not None and ticks >= max_ticks:
+                break
+            if not client.wait_for_frame(timeout_seconds=FRAME_WAIT_SECONDS):
+                missed_frames += 1
+                if ticks == 0 and time.monotonic() - start >= NO_FRAME_ABORT_SECONDS:
+                    print(
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "reason": "no_server_frames",
+                                "elapsed_seconds": round(
+                                    time.monotonic() - start, 2
+                                ),
+                                "hint": "Start the private server first "
+                                "(scripts/run_private_server.ps1)",
+                            },
+                            indent=2,
+                        )
+                    )
+                    return 1
                 continue
+
             observation = client.observe()
             tile = observation.self.tile
             positions.append(tile)
@@ -104,27 +186,32 @@ def main() -> int:
     force_ignored = recent_log.count("waiting for FORCE ack")
     flooding = recent_log.count("Message flooding detected")
 
-    stuck_in_place = unchanged_ticks >= 40
-    spam_same_target = repeat_count >= 80
+    stuck_in_place = unchanged_ticks >= thresholds["stuck_consecutive"]
+    spam_same_target = repeat_count >= thresholds["spam_repeat"]
     ok = (
-        not stuck_in_place
+        ticks > 0
+        and not stuck_in_place
         and not spam_same_target
-        and invalid_paths <= 8
-        and force_ignored <= 2
+        and invalid_paths <= thresholds["invalid_paths"]
+        and force_ignored <= thresholds["force_ignored"]
         and flooding == 0
-        and unique_positions >= 8
+        and unique_positions >= thresholds["min_unique_positions"]
     )
 
     report = {
         "ok": ok,
         "survived": survived,
         "ticks": ticks,
+        "max_seconds": max_seconds,
+        "max_ticks": max_ticks,
         "elapsed_seconds": round(time.monotonic() - start, 2),
+        "missed_frames": missed_frames,
         "unique_positions": unique_positions,
         "unchanged_ticks_at_end": unchanged_ticks,
         "final_tile": {"x": prev_tile.x, "y": prev_tile.y} if prev_tile else None,
         "server_frames": client.server_frames,
         "move_actions": len(move_targets),
+        "thresholds": thresholds,
         "most_repeated_move_target": (
             {"x": most_common_target.x, "y": most_common_target.y, "count": repeat_count}
             if most_common_target is not None

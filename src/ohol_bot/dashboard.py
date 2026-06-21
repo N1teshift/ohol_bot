@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from .danger import base_object_name
 from .model import Action, ActionType, Observation, ObjectState, PlayerState, Tile
+from .tiles import chebyshev
 from .hunger import NO_MOVE_AGE, action_blocker, can_self_act
 from .map_debug import MapRenderConfig, render_observation_map
 from .protocol_client import OholProtocolClient
@@ -308,10 +309,10 @@ def format_dashboard(
     if observation.nearby_players:
         nearby = sorted(
             observation.nearby_players,
-            key=lambda other: _chebyshev(player.tile, other.tile),
+            key=lambda other: chebyshev(player.tile, other.tile),
         )
         for other in nearby[:8]:
-            distance = _chebyshev(player.tile, other.tile)
+            distance = chebyshev(player.tile, other.tile)
             leader_mark = "  LEADER" if other.player_id == follow_leader_id else ""
             name = other.display_name or f"player {other.player_id}"
             relation_mark = f" ({other.relation_to_self})" if other.relation_to_self else ""
@@ -509,10 +510,6 @@ def _format_fact_tile(raw) -> str:
     return f"({x}, {y})"
 
 
-def _chebyshev(a: Tile, b: Tile) -> int:
-    return max(abs(a.x - b.x), abs(a.y - b.y))
-
-
 def _format_camp_layout_lines(camp_layout, camp_stock) -> list[str]:
     if not isinstance(camp_layout, dict):
         return []
@@ -644,13 +641,6 @@ def _action_label(action: Action | None) -> str:
     if action.type is ActionType.PICK_UP:
         return f"pick_up ({action.payload.get('x')}, {action.payload.get('y')})"
     return action.type.value
-
-
-def _nearest_named_object(observation: Observation, names: set[str]) -> ObjectState | None:
-    candidates = [obj for obj in observation.nearby_objects if obj.name in names]
-    if not candidates:
-        return None
-    return min(candidates, key=lambda obj: observation.self.tile.distance_to(obj.tile))
 
 
 def _format_remembered_landmarks(observation: Observation) -> list[str]:

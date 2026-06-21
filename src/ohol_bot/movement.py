@@ -161,6 +161,43 @@ def resolve_approach_tile(
     return min(candidates, key=lambda tile: tile.distance_to(start))
 
 
+def _bfs_parent_map(
+    start: Tile,
+    target: Tile,
+    tile_objects: dict[Tile, int],
+    objects: dict[int, OholObject],
+    *,
+    max_search: int,
+    blocked_tiles: set[Tile],
+) -> tuple[dict[Tile, Tile | None], int, bool]:
+    parent: dict[Tile, Tile | None] = {start: None}
+    queue: deque[Tile] = deque([start])
+    visited = 0
+    found = False
+    while queue:
+        current = queue.popleft()
+        visited += 1
+        if current.distance_to(start) > max_search:
+            continue
+        if current == target:
+            found = True
+            break
+        for neighbor in _neighbors(current):
+            if neighbor in parent:
+                continue
+            if not can_step_to(
+                current,
+                neighbor,
+                tile_objects,
+                objects,
+                blocked_tiles=blocked_tiles,
+            ):
+                continue
+            parent[neighbor] = current
+            queue.append(neighbor)
+    return parent, visited, found
+
+
 def next_walkable_step(
     start: Tile,
     target: Tile,
@@ -202,29 +239,14 @@ def next_walkable_step(
         return preferred
 
     blocked = blocked_tiles or set()
-    parent: dict[Tile, Tile | None] = {start: None}
-    queue: deque[Tile] = deque([start])
-    found = False
-    while queue:
-        current = queue.popleft()
-        if current.distance_to(start) > max_search:
-            continue
-        if current == effective_target:
-            found = True
-            break
-        for neighbor in _neighbors(current):
-            if neighbor in parent:
-                continue
-            if not can_step_to(
-                current,
-                neighbor,
-                tile_objects,
-                objects,
-                blocked_tiles=blocked,
-            ):
-                continue
-            parent[neighbor] = current
-            queue.append(neighbor)
+    parent, _, found = _bfs_parent_map(
+        start,
+        effective_target,
+        tile_objects,
+        objects,
+        max_search=max_search,
+        blocked_tiles=blocked,
+    )
 
     if not found:
         return None
@@ -342,31 +364,14 @@ def walkable_path_with_diagnostics(
         )
 
     blocked = blocked_tiles or set()
-    parent: dict[Tile, Tile | None] = {start: None}
-    queue: deque[Tile] = deque([start])
-    found = False
-    visited = 0
-    while queue:
-        current = queue.popleft()
-        visited += 1
-        if current.distance_to(start) > max_search:
-            continue
-        if current == effective_target:
-            found = True
-            break
-        for neighbor in _neighbors(current):
-            if neighbor in parent:
-                continue
-            if not can_step_to(
-                current,
-                neighbor,
-                tile_objects,
-                objects,
-                blocked_tiles=blocked,
-            ):
-                continue
-            parent[neighbor] = current
-            queue.append(neighbor)
+    parent, visited, found = _bfs_parent_map(
+        start,
+        effective_target,
+        tile_objects,
+        objects,
+        max_search=max_search,
+        blocked_tiles=blocked,
+    )
 
     if not found:
         return PathDiagnostics(

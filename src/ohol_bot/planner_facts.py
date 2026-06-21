@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .model import Observation, Tile
+from .tiles import tile_dict_from_facts, tile_frozenset_from_facts
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,9 +26,9 @@ class PlannerFacts:
 def planner_facts(observation: Observation) -> PlannerFacts:
     facts = observation.facts
     return PlannerFacts(
-        avoid_targets=_tile_tuple_set(facts.get("avoid_targets")),
-        blocked_tiles=_tile_tuple_set(facts.get("blocked_tiles")),
-        previous_tile=_tile_dict(facts.get("previous_tile")),
+        avoid_targets=tile_frozenset_from_facts(facts.get("avoid_targets")),
+        blocked_tiles=tile_frozenset_from_facts(facts.get("blocked_tiles")),
+        previous_tile=tile_dict_from_facts(facts.get("previous_tile")),
         nearest_remembered_food=_remembered_target(
             facts.get("nearest_remembered_food")
         ),
@@ -35,22 +36,6 @@ def planner_facts(observation: Observation) -> PlannerFacts:
             facts.get("nearest_remembered_collect")
         ),
     )
-
-
-def _tile_tuple_set(raw: Any) -> frozenset[Tile]:
-    if not isinstance(raw, tuple):
-        return frozenset()
-    return frozenset(Tile(int(x), int(y)) for x, y in raw)
-
-
-def _tile_dict(raw: Any) -> Tile | None:
-    if not isinstance(raw, Mapping):
-        return None
-    x = raw.get("x")
-    y = raw.get("y")
-    if x is None or y is None:
-        return None
-    return Tile(int(x), int(y))
 
 
 def _remembered_target(raw: Any) -> RememberedTarget | None:

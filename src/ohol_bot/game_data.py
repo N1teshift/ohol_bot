@@ -183,25 +183,32 @@ def _parse_spawn_biomes(lines: list[str]) -> frozenset[int]:
     return frozenset(biome_ids)
 
 
-def _normalize_object_name(name: str) -> str:
-    return name.strip().lower()
+from .object_names import normalize_item_name
 
 
 def build_stack_collect_catalog(
     game_data: OholGameData | None,
 ) -> tuple[dict[str, Any], ...]:
     """Map stackable loose items to pile objects and transition target ids."""
+    return tuple(rule.to_dict() for rule in build_stack_collect_rules(game_data))
+
+
+def build_stack_collect_rules(
+    game_data: OholGameData | None,
+) -> tuple[StackCollectRule, ...]:
+    from .collect_rules import StackCollectRule
+
     if game_data is None:
         return ()
 
     loose_by_name = {
-        _normalize_object_name(obj.name): obj for obj in game_data.objects.values()
+        normalize_item_name(obj.name): obj for obj in game_data.objects.values()
     }
-    rules: list[dict[str, Any]] = []
+    rules: list[StackCollectRule] = []
     seen_loose_ids: set[int] = set()
 
     for pile_obj in game_data.objects.values():
-        pile_name = _normalize_object_name(pile_obj.name)
+        pile_name = normalize_item_name(pile_obj.name)
         if not pile_name.endswith(" pile"):
             continue
         loose_name = pile_name[: -len(" pile")].strip()
@@ -233,18 +240,18 @@ def build_stack_collect_catalog(
                 }
             )
         )
-        aliases = tuple(sorted({loose_name, pile_name, loose_name.replace(" ", "")}))
+        aliases = frozenset({loose_name, pile_name, loose_name.replace(" ", "")})
         rules.append(
-            {
-                "display_name": loose_obj.name,
-                "loose_names": loose_names,
-                "pile_names": pile_names,
-                "loose_object_id": loose_id,
-                "pile_object_id": pile_id,
-                "depot_target_ids": depot_target_ids,
-                "source_target_ids": source_target_ids,
-                "query_aliases": aliases,
-            }
+            StackCollectRule(
+                display_name=loose_obj.name,
+                loose_names=frozenset(loose_names),
+                pile_names=frozenset(pile_names),
+                loose_object_id=loose_id,
+                pile_object_id=pile_id,
+                depot_target_ids=depot_target_ids,
+                source_target_ids=source_target_ids,
+                query_aliases=aliases,
+            )
         )
 
     return tuple(rules)
@@ -263,9 +270,9 @@ _CAMP_STACK_SPECS: tuple[dict[str, Any], ...] = (
         "aliases": ("sharp stones",),
     },
     {
-        "loose_name": "flint",
+        "loose_name": "flint chip",
         "pile_names": (),
-        "aliases": ("flints",),
+        "aliases": ("flints", "flint"),
         "drop_only": True,
     },
     {
@@ -306,9 +313,9 @@ def _object_by_normalized_name(
     game_data: OholGameData,
     name: str,
 ) -> OholObject | None:
-    normalized = _normalize_object_name(name)
+    normalized = normalize_item_name(name)
     for obj in game_data.objects.values():
-        if _normalize_object_name(obj.name) == normalized:
+        if normalize_item_name(obj.name) == normalized:
             return obj
     return None
 
@@ -399,8 +406,11 @@ def merge_camp_stack_catalog(
     game_data: OholGameData | None,
 ) -> tuple[dict[str, Any], ...]:
     """Merge auto-catalog rules with camp overrides (camp wins on loose_object_id)."""
+    from .harvest import build_harvest_catalog, merge_harvest_into_stack_rule
+
     camp_rules = build_camp_stack_rules(game_data)
-    if not camp_rules:
+    harvest_catalog = build_harvest_catalog(game_data)
+    if not camp_rules and not harvest_catalog:
         return catalog
     by_loose_id: dict[int, dict[str, Any]] = {}
     for rule in catalog:
@@ -409,6 +419,12 @@ def merge_camp_stack_catalog(
             by_loose_id[loose_id] = dict(rule)
     for rule in camp_rules:
         loose_id = rule.get("loose_object_id")
+        merged = merge_harvest_into_stack_rule(dict(rule), harvest_catalog)
         if isinstance(loose_id, int):
-            by_loose_id[loose_id] = dict(rule)
-    return tuple(by_loose_id[loose_id] for loose_id in sorted(by_loose_id))
+            by_loose_id[loose_id] = merged
+        elif isinstance(merged.get("loose_object_id"), int):
+            by_loose_id[merged["loose_object_id"]] = merged
+    merged_catalog = tuple(by_loose_id[loose_id] for loose_id in sorted(by_loose_id))
+    if harvest_catalog:
+        return merged_catalog
+    return merged_catalog if camp_rules else catalog

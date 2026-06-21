@@ -7,9 +7,11 @@ from pathlib import Path
 from .biomes import count_biomes_in_radius
 from .danger import dangerous_objects_preview, dangerous_tiles, danger_path_blockers
 from .game_data import OholGameData, build_stack_collect_catalog, merge_camp_stack_catalog
+from .harvest import build_harvest_catalog
 from .camp_depot import CampLayout, camp_layout_to_facts
 from .home import DEFAULT_HOME_AREA_RADIUS
 from .model import Action, ActionType, ObjectState, Observation, PlayerState, Tile, step_toward
+from .tiles import chebyshev
 from .movement import blocking_footprint_tiles, next_walkable_step, walkable_path
 from .naming import (
     DEFAULT_BABY_NAMING_PHRASES,
@@ -218,6 +220,18 @@ class WorldState:
                     self._clear_self_held_display()
                     tile = Tile(action.payload["target_x"], action.payload["target_y"])
                     self.spatial_memory.forget_tile(self.to_absolute(tile))
+                    return
+                tile = Tile(action.payload["target_x"], action.payload["target_y"])
+                if _is_knap_stone_on_rock_use(
+                    observation,
+                    tile,
+                    game_data,
+                ):
+                    self.pending_held_object_id = 34
+                    self.latched_self_held_object_id = 34
+                    self.pending_held_food_value = 0
+                    self.expect_empty_hands = False
+                    return
                 return
             tile = Tile(action.payload["target_x"], action.payload["target_y"])
             picked = _object_at(observation, tile)
@@ -402,7 +416,7 @@ class WorldState:
         for player_id, player in self.players.items():
             if player_id == self.self_player_id:
                 continue
-            if _chebyshev(self_player.tile, player.tile) > radius:
+            if chebyshev(self_player.tile, player.tile) > radius:
                 continue
             other = enrich_player_with_lineage(
                 enrich_player_with_identity(player, self.player_identities),
@@ -430,6 +444,7 @@ class WorldState:
             build_stack_collect_catalog(game_data),
             game_data,
         )
+        harvest_catalog = build_harvest_catalog(game_data)
         camp_layout_facts = (
             camp_layout_to_facts(self.camp_layout)
             if self.camp_layout is not None
@@ -484,6 +499,7 @@ class WorldState:
                 ),
                 "known_blocking_objects": known_blocking_objects,
                 "stack_collect_catalog": stack_collect_catalog,
+                "harvest_catalog": harvest_catalog,
                 "camp_layout": camp_layout_facts,
                 "last_move_path": tuple(
                     (tile.x, tile.y) for tile in self.feedback.last_move_path
@@ -969,6 +985,30 @@ def _object_at(observation: Observation, tile: Tile) -> ObjectState | None:
     return None
 
 
+def _is_knap_stone_on_rock_use(
+    observation: Observation,
+    target: Tile,
+    game_data: OholGameData | None,
+) -> bool:
+    held_id = observation.self.held_object_id
+    if held_id is None and observation.self.held_object_name is not None:
+        held_name = observation.self.held_object_name.strip().lower()
+        if held_name == "stone":
+            held_id = 33
+    if held_id != 33:
+        return False
+    target_obj = _object_at(observation, target)
+    if target_obj is None:
+        return False
+    if target_obj.object_id == 32:
+        return True
+    if game_data is not None:
+        record = game_data.objects.get(target_obj.object_id)
+        if record is not None and record.name.strip().lower() == "big hard rock":
+            return True
+    return target_obj.name.strip().lower() == "big hard rock"
+
+
 def _payload_path(raw) -> tuple[Tile, ...]:
     if not isinstance(raw, tuple):
         return ()
@@ -979,9 +1019,4 @@ def _payload_path(raw) -> tuple[Tile, ...]:
         elif isinstance(item, dict) and "x" in item and "y" in item:
             path.append(Tile(int(item["x"]), int(item["y"])))
     return tuple(path)
-
-
-def _chebyshev(a: Tile, b: Tile) -> int:
-    return max(abs(a.x - b.x), abs(a.y - b.y))
-
 

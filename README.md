@@ -119,10 +119,10 @@ One-shot: `python -m ohol_bot.cli control move 10 east`. Add `--watch` for the d
 - **Action coordinates**: `_action_tile` + `birth_tile` offset for map (absolute) vs MOVE/PU/PM (relative) coords; batched PM start coords anchor the birth offset
 - **Movement dashboard** (`--watch`): goal, last chat, action status, planner/world/server/KA counters with **(+N/5s)** rates, follow/collect/camp stock progress, home + camp fire, working memory, blocked/danger counts, danger nearby preview, path diagnostics, and a compact local tile map (`#` blocked, `!` danger, `F` fire, `1`–`8` camp slots)
 - **Manual control** (`control` CLI)
-- **`scripts/verify_bot_run.py`**: automated stuck detection after movement changes
+- **`scripts/verify_bot_run.py`**: 15s default movement smoke test (stuck tile, spam target, invalid paths); `--seconds 60 --max-ticks 800` for longer checks
 - Game data loader (~4400 objects, transitions) from `.ohol_runtime/server`
 - Mock scenarios and unit tests under `tests/`
-- Full regression suite: `266` tests (run `python -m pytest`)
+- Full regression suite: `302` tests (run `python -m pytest`)
 
 ## Bot API
 
@@ -158,7 +158,8 @@ python -m ohol_bot.cli control --frame-paced --watch
 python -m ohol_bot.cli control move 10 east
 python -m ohol_bot.cli stay-alive --seconds 60 --watch
 python -m ohol_bot.cli verify-live
-python scripts/verify_bot_run.py 800
+python scripts/verify_bot_run.py
+python scripts/verify_bot_run.py --seconds 60 --max-ticks 800
 python scripts/verify_follow_mode.py <leader_player_id> 800
 python -m ohol_bot.cli run-scenario scenarios\find_food.json
 ```

@@ -1,5 +1,13 @@
 from ohol_bot.model import ActionType, ObjectState, Observation, PlayerState, Tile
-from ohol_bot.movement_policy import FollowConfig, MovementFollowPolicy, StackCollectState
+from ohol_bot.action_pending import PendingAction
+from ohol_bot.movement_policy import (
+    CampSlotProgress,
+    CampStockState,
+    FollowConfig,
+    MovementFollowPolicy,
+    StackCollectState,
+)
+from ohol_bot.tiles import chebyshev
 
 
 def _player(
@@ -28,10 +36,6 @@ def _player(
 
 def _object(object_id: int, name: str, x: int, y: int) -> ObjectState:
     return ObjectState(object_id=object_id, name=name, tile=Tile(x, y))
-
-
-def _chebyshev(a: Tile, b: Tile) -> int:
-    return max(abs(a.x - b.x), abs(a.y - b.y))
 
 
 def test_movement_policy_defaults_to_idle_wait() -> None:
@@ -170,7 +174,7 @@ def test_movement_policy_moves_to_adjacent_tile_when_leader_two_tiles_away() -> 
     action = policy.decide(observation)
 
     assert action.type is ActionType.MOVE_TO
-    assert _chebyshev(Tile(action.payload["x"], action.payload["y"]), Tile(2, 0)) == 1
+    assert chebyshev(Tile(action.payload["x"], action.payload["y"]), Tile(2, 0)) == 1
 
 
 def test_movement_policy_treats_danger_tiles_as_soft_penalty() -> None:
@@ -217,7 +221,7 @@ def test_movement_policy_prefers_reachable_follow_candidate() -> None:
 
     assert action.type is ActionType.MOVE_TO
     assert target != Tile(1, 1)
-    assert _chebyshev(target, Tile(2, 2)) == 1
+    assert chebyshev(target, Tile(2, 2)) == 1
     assert observation.facts["follow_candidate_tiles"][0]["reachable"] is True
 
 
@@ -470,7 +474,7 @@ def test_movement_policy_collect_waits_for_stationary_before_pickup() -> None:
 
     assert action.type is ActionType.WAIT
     assert observation.facts["collect_reason"] == "wait stationary for pickup"
-    assert policy._collect_pickup_tile is None
+    assert policy._pickup_pending.tile is None
 
 
 def test_movement_policy_collect_drops_wrong_item_after_pickup_attempt() -> None:
@@ -816,8 +820,7 @@ def test_movement_policy_collect_stack_counts_deposit_after_settle() -> None:
         pile_names=frozenset({"stone pile"}),
         depot_origin=Tile(0, 0),
         depot_tile=Tile(0, 1),
-        pending_deposit_tile=Tile(0, 1),
-        pending_deposit_sent_tick=2,
+        deposit_pending=PendingAction(tile=Tile(0, 1), sent_tick=2),
     )
     policy.mode = "collect_stack"
     settling = Observation(
@@ -876,8 +879,7 @@ def test_movement_policy_collect_stack_completes_at_six_deposits() -> None:
         depot_origin=Tile(0, 0),
         depot_tile=Tile(0, 1),
         deposited_count=5,
-        pending_deposit_tile=Tile(0, 1),
-        pending_deposit_sent_tick=1,
+        deposit_pending=PendingAction(tile=Tile(0, 1), sent_tick=1),
     )
     policy.mode = "collect_stack"
     observation = Observation(
@@ -992,7 +994,7 @@ def test_movement_policy_collect_stack_waits_for_stationary_before_pile_pickup()
 
     assert action.type is ActionType.WAIT
     assert observation.facts["collect_reason"] == "wait stationary for pickup"
-    assert policy._collect_pickup_tile is None
+    assert policy._pickup_pending.tile is None
 
 
 def test_movement_policy_enters_collect_stack_limestone_from_chat_command() -> None:
@@ -1045,7 +1047,7 @@ def test_movement_policy_collect_stack_limestone_uses_existing_pile() -> None:
 
 
 def test_parse_collect_stack_command_accepts_any_item_name() -> None:
-    from ohol_bot.movement_policy import _parse_collect_stack_command
+    from ohol_bot.movement_chat import parse_collect_stack_command as _parse_collect_stack_command
 
     assert _parse_collect_stack_command("collect stack stone") == "stone"
     assert _parse_collect_stack_command("collect stack limestone") == "limestone"
@@ -1181,6 +1183,23 @@ def test_movement_policy_make_sharp_stone_uses_rock_when_holding_stone() -> None
     assert observation.facts["collect_reason"] == "move beside big hard rock"
 
 
+def test_movement_policy_knap_moves_off_diagonal_before_use() -> None:
+    policy = MovementFollowPolicy()
+    policy.mode = "make_sharp_stone"
+    policy.make_sharp_stone_requested_by = 8
+    observation = Observation(
+        tick=1,
+        self=_player(5, 7, 1, held_object_id=33, held_object_name="Stone"),
+        nearby_objects=(_object(32, "Big Hard Rock", 8, 0),),
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.MOVE_TO
+    assert action.payload in ({"x": 8, "y": 1}, {"x": 7, "y": 0})
+    assert observation.facts["collect_reason"] == "move beside big hard rock"
+
+
 def test_movement_policy_make_sharp_stone_knaps_when_adjacent_to_rock() -> None:
     policy = MovementFollowPolicy()
     policy.mode = "make_sharp_stone"
@@ -1196,6 +1215,28 @@ def test_movement_policy_make_sharp_stone_knaps_when_adjacent_to_rock() -> None:
     assert action.type is ActionType.USE
     assert action.payload == {"target_x": 6, "target_y": 0}
     assert observation.facts["collect_reason"] == "knap stone on big hard rock"
+
+
+def test_movement_policy_knap_waits_for_settle_before_retry() -> None:
+    policy = MovementFollowPolicy(FollowConfig(knap_settle_ticks=4))
+    policy.mode = "make_sharp_stone"
+    policy.make_sharp_stone_requested_by = 8
+    base = Observation(
+        tick=1,
+        self=_player(5, 5, 0, held_object_id=33, held_object_name="Stone"),
+        nearby_objects=(_object(32, "Big Hard Rock", 6, 0),),
+    )
+    first = policy.decide(base)
+    assert first.type is ActionType.USE
+
+    wait_observation = Observation(
+        tick=2,
+        self=_player(5, 5, 0, held_object_id=33, held_object_name="Stone"),
+        nearby_objects=(_object(32, "Big Hard Rock", 6, 0),),
+    )
+    wait = policy.decide(wait_observation)
+    assert wait.type is ActionType.WAIT
+    assert "knap settle wait" in wait_observation.facts["collect_reason"]
 
 
 def test_movement_policy_make_sharp_stone_completes_when_holding_result() -> None:
@@ -1234,15 +1275,28 @@ def _camp_stack_catalog() -> tuple[dict, ...]:
             "query_aliases": ("stone", "stone pile"),
         },
         {
-            "display_name": "Flint",
-            "loose_names": ("flint",),
+            "display_name": "Flint Chip",
+            "loose_names": ("flint chip",),
             "pile_names": (),
-            "loose_object_id": 133,
+            "loose_object_id": 135,
             "pile_object_id": None,
             "depot_target_ids": (),
             "source_target_ids": (),
-            "query_aliases": ("flint",),
+            "query_aliases": ("flint", "flint chip", "flints"),
             "drop_only": True,
+            "harvest": {
+                "query": "flint",
+                "display_name": "Flint Chip",
+                "plant_object_ids": (133,),
+                "plant_names": ("flint",),
+                "dug_object_id": 150,
+                "dug_names": ("flint chips",),
+                "product_object_id": 135,
+                "product_names": ("flint chip",),
+                "tool_object_ids": (34,),
+                "tool_names": ("sharp stone",),
+                "query_aliases": ("flint", "flint chip", "flints"),
+            },
         },
     )
 
@@ -1309,7 +1363,7 @@ def test_movement_policy_stock_camp_prioritizes_nearest_source() -> None:
         home=Tile(0, 0),
         nearby_objects=(
             _object(33, "Stone", 5, 0),
-            _object(133, "Flint", 1, 0),
+            _object(135, "Flint Chip", 1, 0),
         ),
         facts={
             "chat_events": ({"sequence": 1, "player_id": 8, "text": "stock camp"},),
@@ -1330,7 +1384,7 @@ def test_movement_policy_stock_camp_deposits_at_slot_tile() -> None:
     layout = _camp_layout_facts()
     policy.mode = "stock_camp"
     policy.stock_camp_requested_by = 8
-    from ohol_bot.movement_policy import _camp_stock_state_from_layout
+    from ohol_bot.stack_collect import camp_stock_state_from_layout as _camp_stock_state_from_layout
     from ohol_bot.camp_depot import camp_layout_from_facts
 
     camp_layout = camp_layout_from_facts(layout)
@@ -1355,4 +1409,340 @@ def test_movement_policy_stock_camp_deposits_at_slot_tile() -> None:
     assert action.type is ActionType.DROP
     assert action.payload == {"x": -1, "y": 9}
     assert "camp slot 1" in observation.facts["collect_reason"]
+
+
+def _harvest_catalog() -> tuple[dict, ...]:
+    return (
+        {
+            "query": "burdock",
+            "display_name": "Burdock Root",
+            "plant_object_ids": (804,),
+            "plant_names": ("burdock",),
+            "dug_object_id": 806,
+            "dug_names": ("dug burdock",),
+            "product_object_id": 807,
+            "product_names": ("burdock root",),
+            "tool_object_ids": (34, 722),
+            "tool_names": ("sharp stone", "@ shallow digger"),
+            "query_aliases": ("burdock", "burdock root"),
+        },
+        {
+            "query": "wild carrot",
+            "display_name": "Wild Carrot",
+            "plant_object_ids": (404,),
+            "plant_names": ("wild carrot",),
+            "dug_object_id": 39,
+            "dug_names": ("dug wild carrot",),
+            "product_object_id": 40,
+            "product_names": ("wild carrot",),
+            "tool_object_ids": (34, 722),
+            "tool_names": ("sharp stone", "@ shallow digger"),
+            "query_aliases": ("wild carrot",),
+        },
+    )
+
+
+def test_movement_policy_harvest_digs_burdock_with_sharp_stone() -> None:
+    policy = MovementFollowPolicy()
+    policy.collect_stack = StackCollectState(
+        requested_by=8,
+        item_name="Burdock Root",
+        item_names=frozenset({"burdock root", "burdock"}),
+        pile_names=frozenset({"pile of burdock roots"}),
+        depot_origin=Tile(0, 0),
+        depot_tile=Tile(0, 1),
+        loose_object_id=807,
+        harvest_rule=_harvest_catalog()[0],
+    )
+    policy.mode = "collect_stack"
+    observation = Observation(
+        tick=1,
+        self=_player(5, 5, 0, held_object_id=34, held_object_name="Sharp Stone"),
+        nearby_objects=(_object(804, "Burdock", 6, 0),),
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.USE
+    assert action.payload == {"target_x": 6, "target_y": 0}
+
+
+def test_movement_policy_harvest_uses_sharp_stone_on_adjacent_burdock() -> None:
+    policy = MovementFollowPolicy()
+    policy.collect_stack = StackCollectState(
+        requested_by=8,
+        item_name="Burdock Root",
+        item_names=frozenset({"burdock root", "burdock"}),
+        pile_names=frozenset(),
+        depot_origin=Tile(0, 0),
+        depot_tile=Tile(0, 1),
+        loose_object_id=807,
+        harvest_rule=_harvest_catalog()[0],
+    )
+    policy.mode = "collect_stack"
+    observation = Observation(
+        tick=1,
+        self=_player(5, 5, 0, held_object_id=34, held_object_name="Sharp Stone"),
+        nearby_objects=(_object(804, "Burdock", 6, 0),),
+    )
+    policy._harvest_work_tile = Tile(6, 0)
+
+    action = policy.decide(
+        Observation(
+            tick=2,
+            self=_player(5, 5, 0, held_object_id=34, held_object_name="Sharp Stone"),
+            nearby_objects=(_object(804, "Burdock", 6, 0),),
+        )
+    )
+
+    assert action.type is ActionType.USE
+    assert action.payload == {"target_x": 6, "target_y": 0}
+
+
+def test_movement_policy_harvest_drops_tool_before_gathering_dug_plant() -> None:
+    policy = MovementFollowPolicy()
+    policy.collect_stack = StackCollectState(
+        requested_by=8,
+        item_name="Burdock Root",
+        item_names=frozenset({"burdock root"}),
+        pile_names=frozenset(),
+        depot_origin=Tile(0, 0),
+        depot_tile=Tile(0, 1),
+        loose_object_id=807,
+        harvest_rule=_harvest_catalog()[0],
+    )
+    policy.mode = "collect_stack"
+    policy._harvest_work_tile = Tile(6, 0)
+    observation = Observation(
+        tick=3,
+        self=_player(5, 6, 0, held_object_id=34, held_object_name="Sharp Stone"),
+        nearby_objects=(_object(806, "Dug Burdock", 6, 0),),
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.DROP
+
+
+def test_movement_policy_harvest_gathers_product_from_dug_tile() -> None:
+    policy = MovementFollowPolicy()
+    policy.collect_stack = StackCollectState(
+        requested_by=8,
+        item_name="Burdock Root",
+        item_names=frozenset({"burdock root"}),
+        pile_names=frozenset(),
+        depot_origin=Tile(0, 0),
+        depot_tile=Tile(0, 1),
+        loose_object_id=807,
+        harvest_rule=_harvest_catalog()[0],
+    )
+    policy.mode = "collect_stack"
+    policy._harvest_work_tile = Tile(6, 0)
+    observation = Observation(
+        tick=4,
+        self=_player(5, 5, 0),
+        nearby_objects=(_object(806, "Dug Burdock", 6, 0),),
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.USE
+    assert action.payload == {"target_x": 6, "target_y": 0}
+
+
+def test_movement_policy_harvest_knaps_round_stone_when_needed() -> None:
+    policy = MovementFollowPolicy()
+    policy.collect_stack = StackCollectState(
+        requested_by=8,
+        item_name="Wild Carrot",
+        item_names=frozenset({"wild carrot"}),
+        pile_names=frozenset(),
+        depot_origin=Tile(0, 0),
+        depot_tile=Tile(0, 1),
+        loose_object_id=40,
+        harvest_rule=_harvest_catalog()[1],
+    )
+    policy.mode = "collect_stack"
+    observation = Observation(
+        tick=1,
+        self=_player(5, 6, 0, held_object_id=33, held_object_name="Stone"),
+        nearby_objects=(
+            _object(404, "Wild Carrot", 8, 0),
+            _object(32, "Big Hard Rock", 7, 0),
+        ),
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.USE
+    assert action.payload == {"target_x": 7, "target_y": 0}
+
+
+def test_nearest_harvest_plant_ignores_loose_wild_carrot_product() -> None:
+    from ohol_bot.stack_collect import _nearest_harvest_plant
+
+    rule = _harvest_catalog()[1]
+    observation = Observation(
+        tick=1,
+        self=_player(5, 5, 0),
+        nearby_objects=(_object(40, "Wild Carrot", 0, 1),),
+    )
+
+    assert _nearest_harvest_plant(observation, rule, Tile(0, 1)) is None
+
+
+def test_nearest_stack_source_matches_harvest_product_by_id_only() -> None:
+    from ohol_bot.stack_collect import nearest_stack_source as _nearest_stack_source
+
+    state = StackCollectState(
+        requested_by=8,
+        item_name="Wild Carrot",
+        item_names=frozenset({"wild carrot"}),
+        pile_names=frozenset(),
+        depot_origin=Tile(0, 0),
+        depot_tile=Tile(0, 1),
+        loose_object_id=40,
+        harvest_rule=_harvest_catalog()[1],
+    )
+    observation = Observation(
+        tick=1,
+        self=_player(5, 5, 0),
+        nearby_objects=(
+            _object(40, "Wild Carrot", 6, 0),
+            _object(404, "Wild Carrot", 8, 0),
+        ),
+    )
+
+    selected = _nearest_stack_source(observation, state)
+
+    assert selected is not None
+    assert selected.object_id == 40
+
+
+def test_stock_camp_does_not_use_sharp_stone_on_depot_carrot() -> None:
+    policy = MovementFollowPolicy()
+    slot_state = StackCollectState(
+        requested_by=8,
+        item_name="Wild Carrot",
+        item_names=frozenset({"wild carrot"}),
+        pile_names=frozenset(),
+        depot_origin=None,
+        depot_tile=Tile(0, 1),
+        loose_object_id=40,
+        desired_count=6,
+        harvest_rule=_harvest_catalog()[1],
+    )
+    policy.mode = "stock_camp"
+    policy.camp_stock = CampStockState(
+        requested_by=8,
+        slots=(CampSlotProgress(slot_id=1, state=slot_state),),
+    )
+    observation = Observation(
+        tick=1,
+        self=_player(5, 5, 0),
+        nearby_objects=(
+            _object(40, "Wild Carrot", 0, 1),
+            _object(34, "Sharp Stone", 5, 6),
+        ),
+    )
+
+    action = policy.decide(observation)
+
+    if action.type is ActionType.USE:
+        assert action.payload != {"target_x": 0, "target_y": 1}
+
+
+def test_should_prefer_nearby_loose_carrot_over_dug_plant() -> None:
+    from ohol_bot.stack_collect import _should_prefer_loose_over_harvest
+
+    rule = _harvest_catalog()[1]
+    state = StackCollectState(
+        requested_by=8,
+        item_name="Wild Carrot",
+        item_names=frozenset({"wild carrot"}),
+        pile_names=frozenset(),
+        depot_origin=Tile(0, 0),
+        depot_tile=Tile(0, 1),
+        loose_object_id=40,
+        harvest_rule=rule,
+    )
+    observation = Observation(
+        tick=1,
+        self=_player(5, 5, 0),
+        nearby_objects=(
+            _object(40, "Wild Carrot", 6, 0),
+            _object(39, "Dug Wild Carrot", 12, 0),
+        ),
+    )
+
+    assert _should_prefer_loose_over_harvest(observation, state) is True
+
+
+def test_movement_policy_harvest_knaps_flint_outcrop_with_sharp_stone() -> None:
+    flint_rule = _camp_stack_catalog()[1]["harvest"]
+    policy = MovementFollowPolicy()
+    policy.collect_stack = StackCollectState(
+        requested_by=8,
+        item_name="Flint Chip",
+        item_names=frozenset({"flint chip"}),
+        pile_names=frozenset(),
+        depot_origin=Tile(0, 0),
+        depot_tile=Tile(0, 1),
+        loose_object_id=135,
+        drop_only=True,
+        harvest_rule=flint_rule,
+    )
+    policy.mode = "collect_stack"
+    observation = Observation(
+        tick=1,
+        self=_player(5, 5, 0, held_object_id=34, held_object_name="Sharp Stone"),
+        nearby_objects=(_object(133, "Flint", 6, 0),),
+    )
+
+    action = policy.decide(observation)
+
+    assert action.type is ActionType.USE
+    assert action.payload == {"target_x": 6, "target_y": 0}
+
+
+def test_stock_camp_drops_surplus_carrot_without_repick_loop() -> None:
+    policy = MovementFollowPolicy()
+    slot_state = StackCollectState(
+        requested_by=8,
+        item_name="Wild Carrot",
+        item_names=frozenset({"wild carrot"}),
+        pile_names=frozenset(),
+        depot_origin=None,
+        depot_tile=Tile(0, 1),
+        loose_object_id=40,
+        desired_count=6,
+        deposited_count=6,
+        harvest_rule=_harvest_catalog()[1],
+    )
+    policy.mode = "stock_camp"
+    policy.camp_stock = CampStockState(
+        requested_by=8,
+        slots=(CampSlotProgress(slot_id=5, state=slot_state),),
+    )
+    holding = Observation(
+        tick=1,
+        self=_player(5, 5, 0, held_object_id=40, held_object_name="Wild Carrot"),
+        nearby_objects=(_object(40, "Wild Carrot", 6, 0),),
+    )
+
+    drop_action = policy.decide(holding)
+
+    assert drop_action.type is ActionType.DROP
+    assert "surplus" in holding.facts["collect_reason"]
+
+    after_drop = Observation(
+        tick=2,
+        self=_player(5, 5, 0),
+        nearby_objects=(_object(40, "Wild Carrot", 6, 0),),
+    )
+    wait_action = policy.decide(after_drop)
+
+    assert wait_action.type is ActionType.WAIT
+    assert after_drop.facts["collect_reason"] == "stock camp complete"
+    assert policy.mode == "idle"
 

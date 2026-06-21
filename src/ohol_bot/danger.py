@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Iterable
 
 from .model import ObjectState, Tile
+from .tiles import chebyshev
 
 if TYPE_CHECKING:
     from .game_data import OholGameData
@@ -102,14 +103,11 @@ def danger_near_route(
     min_y = min(start.y, target.y) - corridor
     max_y = max(start.y, target.y) + corridor
     for tile in danger_tiles:
-        if _chebyshev(tile, start) <= start_radius:
+        if chebyshev(tile, start) <= start_radius:
             return True
-        if _chebyshev(tile, target) <= target_radius:
+        if chebyshev(tile, target) <= target_radius:
             return True
         if min_x <= tile.x <= max_x and min_y <= tile.y <= max_y:
             return True
     return False
 
-
-def _chebyshev(a: Tile, b: Tile) -> int:
-    return max(abs(a.x - b.x), abs(a.y - b.y))

@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from .danger import base_object_name
 from .model import ObjectState, Observation, Tile
+from .tiles import chebyshev
 
 if TYPE_CHECKING:
     from .game_data import OholGameData
@@ -71,7 +72,7 @@ def find_home_center_near(
     for obj in observation.nearby_objects:
         if not is_home_center_object(obj, game_data):
             continue
-        distance = _chebyshev(origin, obj.tile)
+        distance = chebyshev(origin, obj.tile)
         if distance > max_radius:
             continue
         candidates.append(
@@ -104,8 +105,5 @@ def is_at_home(
         return False
     position = tile if tile is not None else observation.self.tile
     limit = radius if radius is not None else home_area_radius(observation)
-    return _chebyshev(position, observation.home) <= limit
+    return chebyshev(position, observation.home) <= limit
 
-
-def _chebyshev(a: Tile, b: Tile) -> int:
-    return max(abs(a.x - b.x), abs(a.y - b.y))

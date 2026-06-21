@@ -129,7 +129,18 @@ ohol_bot/
 │   ├── spatial_memory.py        # Working (radius 24) + long-term map memory (absolute tiles)
 │   ├── resource_memory.py       # Branch/tree landmark names + collect matching helpers
 │   ├── movement.py              # BFS pathfinding + dynamic diagonal paths + diagnostics + wide-collision footprint checks
-│   ├── movement_policy.py       # Idle/follow/collect/collect-stack policy driven by chat
+│   ├── movement_policy.py       # MovementFollowPolicy orchestrator (idle/follow/collect/stack/camp)
+│   ├── movement_chat.py         # Chat command parsing for movement modes
+│   ├── movement_facts.py        # MovementFacts annotation on observation.facts
+│   ├── follow_target.py         # Follow formation target scoring/selection
+│   ├── stack_collect.py         # Stack/collect/camp runtime state and helpers
+│   ├── harvest_flow.py          # Dig-harvest flow re-exports from stack_collect
+│   ├── collect_rules.py         # Typed HarvestRule / StackCollectRule dataclasses
+│   ├── interact_flow.py         # Navigate/pickup/drop/empty-hands helpers
+│   ├── action_pending.py        # PendingAction retry/settle timers
+│   ├── tiles.py                 # Chebyshev/adjacency, fact tile parsing, danger_tiles()
+│   ├── spatial_queries.py       # nearest_object(), object_at_tile()
+│   ├── object_names.py          # Item name normalization and stone/rock matchers
 │   ├── map_debug.py             # Compact ASCII local tile map for movement debugging
 │   ├── game_data.py             # objects/ transitions from sandbox
 │   ├── planner.py               # SurvivalPlanner orchestrating behavior modules
@@ -235,7 +246,7 @@ $env:PYTHONPATH='src'
 | `run-scenario` | Mock survival demo from `scenarios/*.json` |
 | `parse-server-log` | Parse server terminal log |
 
-**Scripts (not CLI subcommands):** `python scripts/verify_bot_run.py [max_ticks]` runs a movement-only smoke policy and **fails if stuck** (same tile too long, spamming one move target, too many invalid paths). `python scripts/verify_follow_mode.py <leader_player_id> [max_ticks]` checks adjacent follow behavior against a known live leader. Server must be up.
+**Scripts (not CLI subcommands):** `python scripts/verify_bot_run.py` runs a **15-second** movement-only smoke policy and **fails if stuck** (same tile too long, spamming one move target, too many invalid paths). Use `--seconds N` and optional `--max-ticks N` for longer checks (e.g. `--seconds 60 --max-ticks 800`). Positional `verify_bot_run.py 800` still works but is deprecated. `python scripts/verify_follow_mode.py <leader_player_id> [max_ticks]` checks adjacent follow behavior against a known live leader. Server must be up.
 
 ### Recommended live session
 
@@ -544,7 +555,7 @@ If `Held` flips from pie → `nothing` while the in-game sprite still holds food
 - **Dashboard rate counters:** `(+N/5s)` on planner tick, world tick, server frames, KA pings
 - **Dynamic movement batching:** cautious 2-step batches in follow or near danger/blockers; up to 10-step open batches in clear `collect` / `collect_stack` routes
 - **Stuck-on-tree fixes:** `blocked_tiles` memory, rotating explore, adjacent pickup, FORCE ack gating, birth-tile coords
-- **`scripts/verify_bot_run.py`:** automated stuck detection (unchanged tile, spam target, invalid paths)
+- **`scripts/verify_bot_run.py`:** 15s default stuck detection (unchanged tile, spam target, invalid paths); scaled thresholds via `--seconds`
 - **Manual control (`control` CLI):** walk N tiles in a direction from terminal REPL
 - **Eat held food (verified live):** move → `USE` pick up → `SELF x y -1#` at **`_action_tile`** → FX food increase / `just_ate` PU
 - **Self player id lock:** first solo PU or PM-after-MOVE; LN no longer overwrites id
@@ -673,7 +684,7 @@ Wider deadly buffers, remembered threats beyond working radius, terrain/object m
 - `action-probe` should login before actions
 - `requirements.txt` + pytest in dev instructions
 - Broader live tests (craft, die, respawn)
-- Run `python scripts/verify_bot_run.py 800` after movement changes
+- Run `python scripts/verify_bot_run.py` after movement changes (`--seconds 60` for longer checks)
 
 ---
 
@@ -696,7 +707,8 @@ Decision: stay native Python. See [reuse_decision.md](reuse_decision.md).
 | Manual terminal control | `manual_control.py`, `cli.py` (`control`) |
 | Pathfinding | `movement.py`, `protocol_client._resolve_move_path()` |
 | Local map diagnostics | `map_debug.py`, `dashboard.py`, `WorldState.to_observation()` |
-| Follow / idle policy | `movement_policy.py` |
+| Follow / idle policy | `movement_policy.py` (+ `movement_chat.py`, `follow_target.py`, `stack_collect.py`) |
+| Shared movement helpers | `tiles.py`, `spatial_queries.py`, `interact_flow.py`, `action_pending.py` |
 | Follow smoke test | `scripts/verify_follow_mode.py` |
 | Stuck detection smoke test | `scripts/verify_bot_run.py` |
 | Frame-paced + planner Hz loop | `runner.py`, `protocol_client.poll_for_window()`, `--planner-hz` |
@@ -736,8 +748,9 @@ python -m ohol_bot.cli play --planner-hz 6
 # Manual control (no autopilot)
 python -m ohol_bot.cli control --frame-paced
 
-# Stuck-detection smoke test (server must be running)
-python scripts/verify_bot_run.py 800
+# Stuck-detection smoke test (server must be running; ~15s default)
+python scripts/verify_bot_run.py
+python scripts/verify_bot_run.py --seconds 60 --max-ticks 800
 
 # Timed session (50 ticks)
 python -m ohol_bot.cli run-live --max-ticks 50 --tick-seconds 1 --watch

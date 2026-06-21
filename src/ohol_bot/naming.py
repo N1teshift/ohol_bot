@@ -7,6 +7,7 @@ from typing import Mapping
 from .game_data import OholGameData
 from .model import PlayerState, Tile
 from .ohol_names import NameCatalog, parse_assigned_name_line
+from .tiles import chebyshev
 
 EVE_FIRST_NAME = "EVE"
 NAMING_MAX_DISTANCE = 20.0
@@ -137,10 +138,6 @@ def extract_name_after_phrase(text: str, phrases: tuple[str, ...]) -> str | None
     return None
 
 
-def _chebyshev(a: Tile, b: Tile) -> float:
-    return float(max(abs(a.x - b.x), abs(a.y - b.y)))
-
-
 def _get_identity(
     identities: dict[int, PlayerIdentity],
     player_id: int,
@@ -173,7 +170,7 @@ def _closest_nameless_player(
             continue
         if player.age < min_age:
             continue
-        distance = _chebyshev(speaker.tile, player.tile)
+        distance = chebyshev(speaker.tile, player.tile)
         if distance < best_distance:
             best_distance = distance
             best_id = player_id

@@ -10,7 +10,9 @@ from .hunger import eat_blocker
 from .planner_facts import PlannerFacts, planner_facts
 
 from .model import Action, ActionType, Observation, ObjectState, Tile
+from .spatial_queries import nearest_object
 from .home import home_area_radius, is_at_home
+from .tiles import is_adjacent
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +113,7 @@ class SkillLibrary:
         food = observation.nearest_food(exclude=facts.avoid_targets)
 
         if food is not None and food.tile not in facts.avoid_targets:
-            if player.tile == food.tile or _is_adjacent(player.tile, food.tile):
+            if player.tile == food.tile or is_adjacent(player.tile, food.tile):
                 return SkillResult(
                     name="forage_food",
                     action=Action(
@@ -167,7 +169,7 @@ class SkillLibrary:
 
     def collect_named_object(self, observation: Observation, names: set[str]) -> SkillResult | None:
 
-        target = _nearest_named_object(observation, names)
+        target = nearest_object(observation, names=names, normalize_names=False)
 
         if target is not None:
             if observation.self.tile == target.tile:
@@ -197,26 +199,11 @@ class SkillLibrary:
 
 
 
-def _nearest_named_object(observation: Observation, names: set[str]) -> ObjectState | None:
-
-    candidates = [obj for obj in observation.nearby_objects if obj.name in names]
-
-    if not candidates:
-
-        return None
-
-    return min(candidates, key=lambda obj: observation.self.tile.distance_to(obj.tile))
-
-
-def _is_adjacent(a: Tile, b: Tile) -> bool:
-    return max(abs(a.x - b.x), abs(a.y - b.y)) == 1
-
-
 def _adjacent_food(observation: Observation) -> ObjectState | None:
     candidates = [
         obj
         for obj in observation.nearby_objects
-        if obj.food_value > 0 and _is_adjacent(observation.self.tile, obj.tile)
+        if obj.food_value > 0 and is_adjacent(observation.self.tile, obj.tile)
     ]
     if not candidates:
         return None
@@ -274,7 +261,7 @@ def _move_toward_remembered(
         return None
     player = observation.self
     at_target = player.tile == target
-    adjacent = _is_adjacent(player.tile, target)
+    adjacent = is_adjacent(player.tile, target)
     if pickup_when_reached and (at_target or adjacent):
         return SkillResult(
             name="navigate_remembered",

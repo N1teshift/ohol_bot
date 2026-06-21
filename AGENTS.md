@@ -18,7 +18,7 @@ Build Python bots that play One Hour One Life on a local private server, survive
 
 **Follow:** in-game `follow` from another player starts following that speaker; `stop follow` / `idle` returns to idle. Follow uses Chebyshev distance: the bot waits when on the leader's tile or adjacent (distance <= 1), and only moves when distance >= 2 toward a walkable tile exactly one step from the leader. Danger tiles are a soft penalty for formation targets, not a hard ban.
 
-**Collect / stack:** `collect <item>` and **`collect stack <item>`** (e.g. `stone`, `limestone`) are chat-driven modes in `movement_policy.py`. **`make sharp stone`** finds loose **Stone**, picks it up, and **USE**s it on **Big Hard Rock**. Stack mode gathers loose items and matching piles to a depot beside the speaker, deposits **6** by default (per-item stack limits deferred), uses `game_data.build_stack_collect_catalog()`, skips danger-tile sources, and reuses the same source briefly to reduce zigzag. **`set home here`** snaps home to the nearest well/spring (or home marker) within 16 tiles of the speaker; the surrounding **12-tile** area counts as home (`home.py`). It also records a **camp depot grid**: fire tile **8 tiles north** of the well, with **8 numbered slots** (NW=1, clockwise) for fixed stack depots (`camp_depot.py`). **`stock camp`** fills all slots opportunistically — always gathers the **nearest** visible item for any incomplete slot (stone×10, sharp stone×6, flint×6 drop-only, wild onion/carrot/burdock/garlic×6, straight branch×6).
+**Collect / stack:** `collect <item>` and **`collect stack <item>`** (e.g. `stone`, `limestone`) are chat-driven modes in `movement_policy.py`. **`make sharp stone`** finds loose **Stone** (round stone), picks it up, and **USE**s it on **Big Hard Rock**. **Dig harvest** (burdock, wild carrot): hold sharp stone (or knap one first), **USE** on the plant, **drop** the tool, **USE** the dug tile to gather the root/vegetable, then pick up/deposit. Stack mode gathers loose items and matching piles to a depot beside the speaker, deposits **6** by default (per-item stack limits deferred), uses `game_data.build_stack_collect_catalog()` + `harvest.py`, skips danger-tile sources, and reuses the same source briefly to reduce zigzag. **`set home here`** snaps home to the nearest well/spring (or home marker) within 16 tiles of the speaker; the surrounding **12-tile** area counts as home (`home.py`). It also records a **camp depot grid**: fire tile **8 tiles north** of the well, with **8 numbered slots** (NW=1, clockwise) for fixed stack depots (`camp_depot.py`). **`stock camp`** fills all slots opportunistically — always gathers the **nearest** visible item for any incomplete slot (stone×10, sharp stone×6, flint×6 drop-only, wild onion/carrot/burdock/garlic×6, straight branch×6); burdock/carrot run the dig-harvest flow automatically.
 
 **Pacing (important for solo play):** OHOL servers step faster when they receive more client messages. **`--planner-hz 6`** runs a fixed 6 Hz loop, polls the socket, and sends keep-alive at the same rate so the server keeps stepping without a second player nearby. Pair with **`--frame-paced`**. **World tick** (`WorldState.tick`) advances on server **`FM`** frames (policy settle/cooldown timers). Dashboard shows **(+N/5s)** rate counters for planner tick, world tick, server frames, and KA pings.
 
@@ -36,7 +36,7 @@ Build Python bots that play One Hour One Life on a local private server, survive
 2. Python path: `$env:PYTHONPATH='src'`
 3. Do not edit `Program Files` or `.cursor/plans/*.plan.md`
 4. Do not git commit unless the user asks
-5. After movement/pathfinding changes, run: `python scripts/verify_bot_run.py 800`
+5. After movement/pathfinding changes, run: `python scripts/verify_bot_run.py` (15s default; use `--seconds 60` for a longer check)
 
 ## Bot credentials (sandbox)
 
@@ -55,7 +55,16 @@ Build Python bots that play One Hour One Life on a local private server, survive
 | `src/ohol_bot/danger.py` | Dangerous animal detection (`deadlyDistance` + name fallback), path blockers, route-near checks |
 | `src/ohol_bot/movement.py` | BFS pathfinding, batched diagonal paths, `resolve_approach_tile`, corner-cutting, `blocksWalking`, horizontal wide collision |
 | `src/ohol_bot/home.py` | Well/spring home center, 12-tile home area |
-| `src/ohol_bot/movement_policy.py` | Idle/follow/collect/collect-stack/stock-camp chat modes |
+| `src/ohol_bot/movement_policy.py` | MovementFollowPolicy orchestrator (idle/follow/collect/stack/camp) |
+| `src/ohol_bot/movement_chat.py` | Chat command parsing for movement modes |
+| `src/ohol_bot/follow_target.py` | Follow formation target scoring/selection |
+| `src/ohol_bot/stack_collect.py` | Stack/collect/camp runtime state and helpers |
+| `src/ohol_bot/interact_flow.py` | Navigate/pickup/drop/empty-hands helpers |
+| `src/ohol_bot/action_pending.py` | PendingAction retry/settle timers |
+| `src/ohol_bot/tiles.py` | Chebyshev/adjacency, fact tile parsing, danger_tiles() |
+| `src/ohol_bot/spatial_queries.py` | nearest_object(), object_at_tile() |
+| `src/ohol_bot/object_names.py` | Item name normalization and stone/rock matchers |
+| `src/ohol_bot/collect_rules.py` | Typed HarvestRule / StackCollectRule dataclasses |
 | `src/ohol_bot/hunger.py` | Hunger threshold, `action_blocker` / eat blockers (age, moving, eat pending) |
 | `src/ohol_bot/runner.py` | `LiveSessionEngine` — `--frame-paced`, `--planner-hz`, observe/decide/act loop |
 | `src/ohol_bot/protocol_messages.py` | Packet parser (PU, PM, FX, MC, CM, …); `done_moving_seq` |
@@ -69,9 +78,10 @@ Build Python bots that play One Hour One Life on a local private server, survive
 | `src/ohol_bot/relationships.py` | Genetic relation labels vs self (`your sister`, etc.) |
 | `src/ohol_bot/game_data.py` | Objects/transitions; `build_stack_collect_catalog()` + camp stack rules |
 | `src/ohol_bot/camp_depot.py` | Camp fire + 8-slot depot grid on `set home here` |
+| `src/ohol_bot/harvest.py` | Dig-harvest rules for burdock/wild carrot (sharp stone workflow) |
 | `src/ohol_bot/dashboard.py` | Terminal dashboard for `--watch`; per-5s rate counters |
 | `src/ohol_bot/cli.py` | `run-live`, `control`, `stay-alive`, `verify-live`, probes; `--planner-hz` |
-| `scripts/verify_bot_run.py` | Live smoke test — fails if bot gets stuck (unchanged tile, spam target, invalid paths) |
+| `scripts/verify_bot_run.py` | 15s default movement smoke test; `--seconds 60 --max-ticks 800` for longer runs |
 | `scripts/verify_follow_mode.py` | Live follow smoke test against a known leader player id |
 | `config/private_server.json` | Server sandbox settings |
 | `config/local_clients.json` | Bot client credentials |
@@ -107,7 +117,8 @@ python -m ohol_bot.cli control --frame-paced
 
 ```powershell
 $env:PYTHONPATH='src'
-python scripts/verify_bot_run.py 800
+python scripts/verify_bot_run.py
+# longer check: python scripts/verify_bot_run.py --seconds 60 --max-ticks 800
 ```
 
 **Server won't start (`map.db` / KissDB error):** kill stale `OneLifeServer.exe`, delete `.ohol_runtime\server\map.db*` and `mapTime.db`, restart.
